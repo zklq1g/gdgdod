@@ -1,0 +1,40 @@
+[2023-10-27 08:00:01] INFO  payment-svc: Service starting on port 8080.
+[2023-10-27 08:00:02] INFO  payment-svc: Connected to primary DB cluster (db-primary.internal).
+[2023-10-27 08:00:03] INFO  payment-svc: Health check endpoint /healthz is UP.
+[2023-10-27 08:15:22] INFO  payment-svc: Processing batch transaction ID: TXN-99482.
+[2023-10-27 08:15:23] WARN  payment-svc: Query execution time exceeded threshold: 2500ms for TXN-99482.
+[2023-10-27 08:16:05] WARN  payment-svc: Connection pool utilization at 85%.
+[2023-10-27 08:16:45] ERROR payment-svc: Deadlock detected on table `user_ledger`. Transaction rolled back.
+[2023-10-27 08:17:01] ERROR payment-svc: Failed to acquire DB connection within 5000ms timeout.
+[2023-10-27 08:17:02] ERROR payment-svc: java.sql.SQLException: Cannot get a connection, pool error Timeout waiting for idle object.
+[2023-10-27 08:17:15] WARN  payment-svc: Memory usage spike detected: 3.8GB / 4.0GB.
+[2023-10-27 08:17:30] SLACK #ops-alerts: [PagerDuty] CRITICAL: payment-svc error rate > 50% for 5 minutes.
+[2023-10-27 08:18:00] ERROR payment-svc: Unhandled exception in worker thread-14: java.lang.OutOfMemoryError: GC overhead limit exceeded.
+[2023-10-27 08:18:01] INFO  payment-svc: Initiating emergency garbage collection...
+[2023-10-27 08:18:05] ERROR payment-svc: GC failed to free memory. System unstable.
+[2023-10-27 08:18:22] SLACK #eng-war-room: @dave_ops why is the payment service throwing 500s? Black Friday prep is ruined.
+[2023-10-27 08:18:45] SLACK #eng-war-room: @sarah_dev I'm looking. DB CPU is at 100%. Did someone push a bad migration?
+[2023-10-27 08:19:00] ERROR auth-svc: Upstream timeout calling payment-svc:8080/validate. Retrying (1/3).
+[2023-10-27 08:19:10] ERROR auth-svc: Upstream timeout calling payment-svc:8080/validate. Retrying (2/3).
+[2023-10-27 08:19:20] ERROR auth-svc: Circuit breaker OPEN for payment-svc. Failing fast.
+[2023-10-27 08:19:30] SLACK #eng-war-room: @dave_ops Auth service is now failing too. Cascading failure.
+[2023-10-27 08:20:00] FATAL payment-svc: Kernel OOM killer invoked. Process 4492 (java) killed.
+[2023-10-27 08:20:01] INFO  systemd: payment-svc.service: Main process exited, code=killed, status=9/KILL.
+[2023-10-27 08:20:02] INFO  systemd: payment-svc.service: Failed with result 'signal'.
+[2023-10-27 08:20:05] INFO  systemd: payment-svc.service: Scheduled restart job, restart counter is at 1.
+[2023-10-27 08:20:10] INFO  payment-svc: Service starting on port 8080.
+[2023-10-27 08:20:12] ERROR payment-svc: FATAL: connection to db-primary.internal failed: FATAL: sorry, too many clients already.
+[2023-10-27 08:20:15] INFO  systemd: payment-svc.service: Main process exited, code=exited, status=1/FAILURE.
+[2023-10-27 08:20:30] SLACK #eng-war-room: @sarah_dev The pod is in CrashLoopBackOff. It can't connect to Postgres.
+[2023-10-27 08:21:00] SLACK #eng-war-room: @dave_ops I see a stuck query from the new analytics batch job. It's locking the `user_ledger` table.
+[2023-10-27 08:21:15] SLACK #eng-war-room: @sarah_dev Kill it! Kill the analytics job PID!
+[2023-10-27 08:21:30] DB-LOG: [2023-10-27 08:21:30 UTC] LOG: process 8832 still waiting for ShareLock on transaction 99482 after 300000.123 ms.
+[2023-10-27 08:21:45] DB-LOG: [2023-10-27 08:21:45 UTC] FATAL: terminating connection due to administrator command.
+[2023-10-27 08:22:00] SLACK #eng-war-room: @dave_ops Killed PID 8832. DB CPU is dropping.
+[2023-10-27 08:22:15] INFO  payment-svc: Service starting on port 8080.
+[2023-10-27 08:22:16] INFO  payment-svc: Connected to primary DB cluster (db-primary.internal).
+[2023-10-27 08:22:17] INFO  payment-svc: Health check endpoint /healthz is UP.
+[2023-10-27 08:22:30] SLACK #eng-war-room: @sarah_dev Payment service is back online. Clearing the backlog.
+[2023-10-27 08:23:00] WARN  payment-svc: Backlog queue size: 14,022 transactions pending.
+[2023-10-27 08:25:00] INFO  payment-svc: Backlog cleared. System nominal.
+[2023-10-27 08:25:05] SLACK #ops-alerts: [PagerDuty] RESOLVED: payment-svc error rate normalized.
