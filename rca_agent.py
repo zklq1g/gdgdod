@@ -23,10 +23,11 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-# Initialize Google Generative AI Client
-API_KEY = os.getenv("GOOGLE_API_KEY")
+# Strict Environment Variable Check
+API_KEY = os.environ.get("GOOGLE_API_KEY")
 if not API_KEY:
-    raise EnvironmentError("GOOGLE_API_KEY is not set in the environment or .env file.")
+    raise ValueError("GOOGLE_API_KEY not found in environment")
+
 genai.configure(api_key=API_KEY)
 
 class APICallFailedError(Exception):
@@ -88,7 +89,7 @@ def _initiate_stream(model: genai.GenerativeModel, prompt: str):
         prompt,
         generation_config=genai.types.GenerationConfig(
             temperature=0.2,
-            # No max_output_tokens cap — allows full reports for large log files
+            max_output_tokens=8192  # Increased to prevent truncation of detailed reports
         ),
         stream=True
     )
