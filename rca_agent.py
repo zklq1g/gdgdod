@@ -97,7 +97,6 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> str:
             full_prompt,
             generation_config=genai.types.GenerationConfig(
                 temperature=0.2, # Low temperature for factual, deterministic output
-                max_output_tokens=8192
             )
         )
         
