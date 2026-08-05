@@ -89,15 +89,15 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> str:
         )
 
     try:
-        # Initialize the model (using gemini-1.5-flash for speed and cost-efficiency)
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # Initialize the model (using gemini-3.5-flash for speed and cost-efficiency)
+        model = genai.GenerativeModel('gemini-3.5-flash')
         
         # Generate content with safety settings relaxed slightly to allow analysis of "fatal" errors
         response = model.generate_content(
             full_prompt,
             generation_config=genai.types.GenerationConfig(
                 temperature=0.2, # Low temperature for factual, deterministic output
-                max_output_tokens=4096
+                max_output_tokens=8192
             )
         )
         
@@ -111,6 +111,8 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> str:
         raise RuntimeError(f"An unexpected error occurred: {e}")
 
 if __name__ == '__main__':
+    import sys
+    sys.stdout.reconfigure(encoding='utf-8')
     # Test block for local execution
     try:
         with open('mock_logs.txt', 'r', encoding='utf-8') as f:
@@ -121,15 +123,17 @@ if __name__ == '__main__':
         
         # Test 1: Initial Analysis
         rca_report = analyze_incident(log_text=mock_logs)
-        print("\n--- INITIAL RCA REPORT ---")
-        print(rca_report)
+        with open('rca_report.md', 'w', encoding='utf-8') as f:
+            f.write(rca_report)
+        print("\n--- INITIAL RCA REPORT GENERATED: rca_report.md ---")
         
         # Test 2: Revision Cycle
         print("\n--- INITIATING REVISION TEST ---")
         feedback = "The timeline is good, but in the Action Items, please specifically mention adding an alert for DB connection pool utilization exceeding 80%."
         revised_report = analyze_incident(log_text=mock_logs, user_feedback=feedback)
-        print("\n--- REVISED RCA REPORT ---")
-        print(revised_report)
+        with open('rca_report_revised.md', 'w', encoding='utf-8') as f:
+            f.write(revised_report)
+        print("\n--- REVISED RCA REPORT GENERATED: rca_report_revised.md ---")
         
     except FileNotFoundError:
         logger.error("mock_logs.txt not found. Please ensure it exists in the current directory.")
