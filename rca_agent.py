@@ -4,7 +4,6 @@ rca_agent.py
 The Core Brain of the Incident RCA Agent.
 Handles interaction with the Google Gemini API to analyze system logs,
 generate structured Root Cause Analysis (RCA) reports, and process human revisions.
-Includes robust retry logic for API reliability.
 """
 
 import os
@@ -33,7 +32,7 @@ class APICallFailedError(Exception):
     """Custom exception raised when the LLM API call fails after all retry attempts."""
     pass
 
-# Define the primary system prompt enforcing strict citations and structure
+# Define the primary system prompt enforcing strict citations and JSON structure
 SYSTEM_PROMPT = """You are an Expert Site Reliability Engineer (SRE) and Root Cause Analysis (RCA) Specialist. 
 Your task is to analyze the provided system logs and generate a comprehensive, blameless Root Cause Analysis report.
 
@@ -43,16 +42,29 @@ You MUST format your response using EXACTLY the following Markdown headers:
 ## Root Cause
 ## Action Items
 
-CRITICAL RULE - STRICT CITATIONS & TRACEABILITY (ZERO HALLUCINATION):
+CRITICAL RULE 1 - STRICT CITATIONS & TRACEABILITY (ZERO HALLUCINATION):
 In the "Timeline" and "Root Cause" sections, for EVERY single claim, event, or deduction you make, you MUST append a citation in brackets referencing the exact line number from the provided logs (e.g., `[Log Line 14]`). 
 If you make a claim but cannot find direct evidence in the logs to support it, you MUST output `[Evidence Not Found]` instead of guessing. Do not hallucinate information outside the provided logs.
 
-Ensure the "Action Items" section contains clear, actionable tasks to prevent recurrence, formatted as a list.
+CRITICAL RULE 2 - ACTION ITEMS JSON FORMAT:
+The "## Action Items" section MUST NOT be a standard text list. It MUST be a valid JSON array of objects placed at the very end of your response. 
+Wrap this JSON array in a markdown code block exactly like this:
+```json
+[
+  {
+    "Title": "Concise task summary",
+    "Description": "Detailed explanation of what needs to be done and why.",
+    "Priority": "High",
+    "Assignee": "Role (e.g., Backend Eng, DevOps, DBA)"
+  }
+]
+```
+Priority must be exactly "High", "Medium", or "Low". Do not output any text or explanations after the closing ``` of the JSON block.
 """
 
 REVISION_INSTRUCTION = """
 The human engineer has reviewed your previous RCA report and provided the following feedback. 
-Please regenerate the ENTIRE report, incorporating this feedback while strictly maintaining the Markdown structure and the CRITICAL RULE for citations ([Log Line X] or [Evidence Not Found]).
+Please regenerate the ENTIRE report, incorporating this feedback while strictly maintaining the Markdown structure, the CRITICAL RULE 1 for citations, and CRITICAL RULE 2 for the JSON Action Items format.
 
 Human Feedback:
 {feedback}
@@ -67,24 +79,12 @@ Human Feedback:
 def _execute_llm_call(model: genai.GenerativeModel, prompt: str) -> str:
     """
     Internal helper function to execute the LLM API call with Tenacity retry logic.
-    
-    Args:
-        model (genai.GenerativeModel): The initialized Gemini model.
-        prompt (str): The fully constructed prompt to send to the LLM.
-        
-    Returns:
-        str: The raw text response from the LLM.
-        
-    Raises:
-        TooManyRequests: If the API returns a 429 error (retried up to 3 times).
-        ServiceUnavailable: If the API returns a 503 error (retried up to 3 times).
-        google_exceptions.GoogleAPIError: For any other non-retryable Google API errors.
     """
     logger.info("Executing LLM API call...")
     response = model.generate_content(
         prompt,
         generation_config=genai.types.GenerationConfig(
-            temperature=0.2, # Low temperature for factual, deterministic output
+            temperature=0.2,
             # No max_output_tokens cap — allows full reports for large log files
         )
     )
@@ -93,26 +93,13 @@ def _execute_llm_call(model: genai.GenerativeModel, prompt: str) -> str:
 def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> str:
     """
     Analyzes system logs using the Gemini LLM to generate or revise an RCA report.
-
-    Args:
-        log_text (str): The raw text of the system logs.
-        user_feedback (Optional[str]): Optional feedback from a human engineer for revision.
-
-    Returns:
-        str: The generated or revised Markdown RCA report.
-        
-    Raises:
-        ValueError: If the log_text is empty.
-        APICallFailedError: If the LLM API call fails after all retries or encounters a fatal error.
     """
     if not log_text or not log_text.strip():
         raise ValueError("Log text cannot be empty.")
 
-    # Preprocess logs: Add explicit line numbers to ensure 100% accurate citations
     lines = log_text.strip().split('\n')
     numbered_logs = "\n".join([f"Line {i+1}: {line}" for i, line in enumerate(lines)])
 
-    # Construct the final prompt based on whether this is an initial run or a revision
     if user_feedback:
         logger.info("Preparing revised RCA prompt based on human feedback.")
         full_prompt = (
@@ -130,8 +117,6 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> str:
     try:
         # Initialize the model (using gemini-3.5-flash for speed and cost-efficiency)
         model = genai.GenerativeModel('gemini-3.5-flash')
-        
-        # Execute the call with automatic retries for 429 and 503 errors
         return _execute_llm_call(model, full_prompt)
 
     except RetryError as e:
@@ -140,11 +125,9 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> str:
             "The AI service is currently experiencing high traffic or is temporarily unavailable. "
             "Please wait a moment and try again."
         ) from e
-        
     except google_exceptions.GoogleAPIError as e:
         logger.error(f"Google API Error during RCA generation: {e}")
         raise APICallFailedError(f"Failed to communicate with the AI service: {e}") from e
-        
     except Exception as e:
         logger.error(f"Unexpected error during RCA generation: {e}")
         raise APICallFailedError(f"An unexpected system error occurred: {e}") from e
@@ -152,30 +135,25 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> str:
 if __name__ == '__main__':
     import sys
     sys.stdout.reconfigure(encoding='utf-8')
-    # Test block for local execution
     try:
-        # Attempt to read the massive log file first, fallback to standard mock_logs.txt
         log_file = 'massive_mock_logs.txt' if os.path.exists('massive_mock_logs.txt') else 'mock_logs.txt'
-        
         with open(log_file, 'r', encoding='utf-8') as f:
             mock_logs = f.read()
-        
+
         print(f"--- INITIATING TEST RUN WITH {log_file} ---")
-        
-        # Test 1: Initial Analysis
+
         rca_report = analyze_incident(log_text=mock_logs)
         with open('rca_report.md', 'w', encoding='utf-8') as f:
             f.write(rca_report)
         print("\n--- INITIAL RCA REPORT GENERATED: rca_report.md ---")
-        
-        # Test 2: Revision Cycle
+
         print("\n--- INITIATING REVISION TEST ---")
         feedback = "The timeline is good, but in the Action Items, please specifically mention adding an alert for DB connection pool utilization exceeding 80%."
         revised_report = analyze_incident(log_text=mock_logs, user_feedback=feedback)
         with open('rca_report_revised.md', 'w', encoding='utf-8') as f:
             f.write(revised_report)
         print("\n--- REVISED RCA REPORT GENERATED: rca_report_revised.md ---")
-        
+
     except FileNotFoundError:
         logger.error("Log file not found. Please ensure mock_logs.txt or massive_mock_logs.txt exists.")
     except APICallFailedError as e:

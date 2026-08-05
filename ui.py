@@ -174,16 +174,23 @@ if st.session_state.status in ['approved', 'jira']:
 # --- STEP 5: DATAFRAME & DOWNLOAD ---
 if st.session_state.status == 'jira' and st.session_state.jira_df is not None:
     st.markdown("#### Generated Tickets")
-    st.dataframe(st.session_state.jira_df, use_container_width=True, hide_index=True)
     
-    # Prepare CSV for download
-    csv_data = st.session_state.jira_df.to_csv(index=False).encode('utf-8')
-    
-    st.download_button(
-        label="Download jira_tickets.csv :material/download:",
-        data=csv_data,
-        file_name="jira_tickets.csv",
-        mime="text/csv",
-        type="primary",
-        use_container_width=True
-    )
+    if st.session_state.jira_df.empty:
+        st.warning(
+            "The report did not contain a structured JSON action items block. "
+            "Request a revision and ask the model to include a JSON-formatted Action Items section."
+        )
+    else:
+        st.dataframe(st.session_state.jira_df, use_container_width=True, hide_index=True)
+        
+        # Prepare CSV for download
+        csv_data = st.session_state.jira_df.to_csv(index=False).encode('utf-8')
+        
+        st.download_button(
+            label="Download jira_tickets.csv :material/download:",
+            data=csv_data,
+            file_name="jira_tickets.csv",
+            mime="text/csv",
+            type="primary",
+            use_container_width=True
+        )
