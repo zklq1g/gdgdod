@@ -13,7 +13,7 @@ from typing import Optional, Generator
 from dotenv import load_dotenv
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
-from google.api_core.exceptions import TooManyRequests, ServiceUnavailable
+from google.api_core.exceptions import TooManyRequests, ServiceUnavailable, ResourceExhausted
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
 
 # Configure logging
@@ -75,7 +75,7 @@ Human Feedback:
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type((TooManyRequests, ServiceUnavailable)),
+    retry=retry_if_exception_type((TooManyRequests, ServiceUnavailable, ResourceExhausted)),
     reraise=True
 )
 def _initiate_stream(model: genai.GenerativeModel, prompt: str):
