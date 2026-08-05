@@ -3,6 +3,7 @@ test_rca_agent.py
 
 Test suite for the Incident RCA Agent core logic.
 Mocks the Google Generative AI API to ensure zero quota consumption during CI/CD.
+Updated to test streaming generator output.
 """
 
 import os
@@ -23,21 +24,29 @@ def mock_genai_model():
         mock_model_class.return_value = mock_instance
         yield mock_instance
 
+def mock_stream_response(chunks):
+    """Helper to mock a streaming response."""
+    mock_chunks = []
+    for chunk_text in chunks:
+        mock_chunk = MagicMock()
+        mock_chunk.text = chunk_text
+        mock_chunks.append(mock_chunk)
+    return mock_chunks
+
 @patch('time.sleep', return_value=None) # Prevent actual sleeping during retry tests
 def test_analyze_incident_success(mock_sleep, mock_genai_model):
     """Test that a successful API call returns a string with all required Markdown headers."""
     # Arrange
-    mock_response = MagicMock()
-    mock_response.text = (
-        "## Executive Summary\nSystem crashed.\n\n"
-        "## Timeline\n- 08:00 Crash [Log Line 1]\n\n"
-        "## Root Cause\nOOM Error [Log Line 2]\n\n"
+    mock_genai_model.generate_content.return_value = mock_stream_response([
+        "## Executive Summary\nSystem crashed.\n\n",
+        "## Timeline\n- 08:00 Crash [Log Line 1]\n\n",
+        "## Root Cause\nOOM Error [Log Line 2]\n\n",
         "## Action Items\n1. Increase memory."
-    )
-    mock_genai_model.generate_content.return_value = mock_response
+    ])
     
     # Act
-    result = rca_agent.analyze_incident("Line 1: Crash\nLine 2: OOM")
+    result_gen = rca_agent.analyze_incident("Line 1: Crash\nLine 2: OOM")
+    result = "".join(list(result_gen))
     
     # Assert
     assert "## Executive Summary" in result
@@ -50,18 +59,16 @@ def test_analyze_incident_success(mock_sleep, mock_genai_model):
 def test_analyze_incident_retries_on_429(mock_sleep, mock_genai_model):
     """Test that the agent retries up to 3 times when encountering a 429 TooManyRequests error."""
     # Arrange
-    mock_response = MagicMock()
-    mock_response.text = "## Executive Summary\nSuccess after retries."
-    
     # Fail twice, succeed on the third try
     mock_genai_model.generate_content.side_effect = [
         TooManyRequests("429 Rate Limit"),
         TooManyRequests("429 Rate Limit"),
-        mock_response
+        mock_stream_response(["## Executive Summary\nSuccess after retries."])
     ]
     
     # Act
-    result = rca_agent.analyze_incident("Dummy logs")
+    result_gen = rca_agent.analyze_incident("Dummy logs")
+    result = "".join(list(result_gen))
     
     # Assert
     assert "Success after retries" in result
@@ -75,7 +82,7 @@ def test_analyze_incident_fails_after_max_retries(mock_sleep, mock_genai_model):
     
     # Act & Assert
     with pytest.raises(rca_agent.APICallFailedError) as excinfo:
-        rca_agent.analyze_incident("Dummy logs")
+        list(rca_agent.analyze_incident("Dummy logs"))
         
     assert "high traffic or is temporarily unavailable" in str(excinfo.value) or \
            "Failed to communicate with the AI service" in str(excinfo.value)
@@ -84,15 +91,15 @@ def test_analyze_incident_fails_after_max_retries(mock_sleep, mock_genai_model):
 def test_analyze_incident_empty_logs():
     """Test that a ValueError is raised if empty logs are provided."""
     with pytest.raises(ValueError, match="Log text cannot be empty"):
-        rca_agent.analyze_incident("")
+        list(rca_agent.analyze_incident(""))
         
 def test_analyze_incident_includes_user_feedback(mock_genai_model):
     """Test that user feedback is correctly injected into the prompt."""
     # Arrange
-    mock_genai_model.generate_content.return_value = MagicMock(text="Revised report")
+    mock_genai_model.generate_content.return_value = mock_stream_response(["Revised report"])
     
     # Act
-    rca_agent.analyze_incident("Dummy logs", user_feedback="Fix the timeline.")
+    list(rca_agent.analyze_incident("Dummy logs", user_feedback="Fix the timeline."))
     
     # Assert
     # Check that the prompt passed to the API contains the feedback

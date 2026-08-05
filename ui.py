@@ -2,8 +2,8 @@
 ui.py
 
 The Streamlit Frontend for the Incident RCA Agent.
-Provides a minimalist, enterprise-grade interface for log ingestion, 
-human-in-the-loop RCA revision, and Jira ticket export.
+Provides a minimalist, enterprise-grade interface for multi-file log ingestion, 
+streaming human-in-the-loop RCA revision, and Jira ticket export.
 """
 
 import streamlit as st
@@ -63,7 +63,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- SESSION STATE INITIALIZATION ---
-# State machine: 'idle' -> 'uploaded' -> 'generated' <-> 'revision' -> 'approved' -> 'jira'
 if 'status' not in st.session_state:
     st.session_state.status = 'idle'
 if 'logs' not in st.session_state:
@@ -78,37 +77,57 @@ st.header("Incident RCA Agent")
 st.caption("Automated root cause analysis and structured ticket generation.")
 st.divider()
 
-# --- STEP 1: LOG INGESTION ---
+# --- STEP 1: MULTI-FILE LOG INGESTION ---
 st.subheader("1. Ingest Logs")
-uploaded_file = st.file_uploader("Upload system log file (.txt)", type=["txt"], label_visibility="collapsed")
+uploaded_files = st.file_uploader(
+    "Upload system log files (.txt)", 
+    type=["txt"], 
+    accept_multiple_files=True,
+    label_visibility="collapsed"
+)
 
-if uploaded_file is not None:
-    file_contents = uploaded_file.read().decode("utf-8")
-    # Update state only if a new file is uploaded
-    if file_contents != st.session_state.logs:
-        st.session_state.logs = file_contents
+if uploaded_files:
+    # Concatenate all uploaded files with clear separators
+    combined_logs = ""
+    for file in uploaded_files:
+        file_content = file.read().decode("utf-8")
+        combined_logs += f"\n\n--- LOG FILE: {file.name} ---\n\n{file_content}"
+        
+    # Update state only if the combined logs have changed
+    if combined_logs != st.session_state.logs:
+        st.session_state.logs = combined_logs
         st.session_state.status = 'uploaded'
         st.session_state.rca_report = ""
         st.session_state.jira_df = None
         st.rerun()
 
-# --- STEP 2: INITIAL ANALYSIS ---
+# --- STEP 2: INITIAL ANALYSIS (STREAMING) ---
 if st.session_state.status == 'uploaded':
     if st.button("Generate RCA Report", type="primary", use_container_width=True):
-        with st.spinner("Analyzing logs and generating report..."):
-            try:
-                report = rca_agent.analyze_incident(st.session_state.logs)
-                st.session_state.rca_report = report
-                st.session_state.status = 'generated'
-                st.rerun()
-            except Exception as e:
-                st.error(f"Analysis failed: {str(e)}")
+        try:
+            # Initiate the streaming generator
+            response_generator = rca_agent.analyze_incident(st.session_state.logs)
+            
+            # Stream the response to the UI. 
+            # st.write_stream returns the complete string once finished.
+            with st.spinner("Connecting to AI service..."):
+                full_report = st.write_stream(response_generator)
+                
+            # Save the complete report to session state for subsequent steps
+            st.session_state.rca_report = full_report
+            st.session_state.status = 'generated'
+            st.rerun()
+            
+        except rca_agent.APICallFailedError as e:
+            st.error(str(e))
+        except Exception as e:
+            st.error(f"Analysis failed: {str(e)}")
 
 # --- STEP 3: REVIEW & HUMAN-IN-THE-LOOP ---
 if st.session_state.status in ['generated', 'revision', 'approved', 'jira']:
     st.subheader("2. Analysis Output")
     
-    # Display the report in a clean container
+    # Display the finalized report in a clean container
     with st.container(border=True):
         st.markdown(st.session_state.rca_report)
     
@@ -128,7 +147,7 @@ if st.session_state.status in ['generated', 'revision', 'approved', 'jira']:
                 st.session_state.status = 'revision'
                 st.rerun()
 
-    # Revision Flow
+    # Revision Flow (Streaming)
     if st.session_state.status == 'revision':
         st.markdown("#### Revision Cycle")
         with st.form("revision_form"):
@@ -142,14 +161,21 @@ if st.session_state.status in ['generated', 'revision', 'approved', 'jira']:
                 if not feedback.strip():
                     st.warning("Feedback cannot be empty.")
                 else:
-                    with st.spinner("Regenerating report based on feedback..."):
-                        try:
-                            revised_report = rca_agent.analyze_incident(st.session_state.logs, feedback)
-                            st.session_state.rca_report = revised_report
-                            st.session_state.status = 'generated'
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Revision failed: {str(e)}")
+                    try:
+                        response_generator = rca_agent.analyze_incident(st.session_state.logs, feedback)
+                        
+                        # Stream the revised report
+                        with st.spinner("Applying revisions..."):
+                            revised_report = st.write_stream(response_generator)
+                            
+                        st.session_state.rca_report = revised_report
+                        st.session_state.status = 'generated'
+                        st.rerun()
+                        
+                    except rca_agent.APICallFailedError as e:
+                        st.error(str(e))
+                    except Exception as e:
+                        st.error(f"Revision failed: {str(e)}")
 
 # --- STEP 4: APPROVAL & JIRA EXPORT ---
 if st.session_state.status in ['approved', 'jira']:
@@ -162,7 +188,7 @@ if st.session_state.status in ['approved', 'jira']:
     
     if st.session_state.status == 'approved':
         if st.button("Generate Jira Tickets", type="primary", use_container_width=True):
-            with st.spinner("Parsing action items and generating tickets..."):
+            with st.spinner("Parsing action items..."):
                 try:
                     df = jira_skill.generate_jira_tickets(st.session_state.rca_report)
                     st.session_state.jira_df = df

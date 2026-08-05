@@ -4,11 +4,12 @@ rca_agent.py
 The Core Brain of the Incident RCA Agent.
 Handles interaction with the Google Gemini API to analyze system logs,
 generate structured Root Cause Analysis (RCA) reports, and process human revisions.
+Supports streaming responses for real-time UI rendering.
 """
 
 import os
 import logging
-from typing import Optional
+from typing import Optional, Generator
 from dotenv import load_dotenv
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
@@ -76,27 +77,31 @@ Human Feedback:
     retry=retry_if_exception_type((TooManyRequests, ServiceUnavailable)),
     reraise=True
 )
-def _execute_llm_call(model: genai.GenerativeModel, prompt: str) -> str:
+def _initiate_stream(model: genai.GenerativeModel, prompt: str):
     """
     Internal helper function to execute the LLM API call with Tenacity retry logic.
+    Note: Retries only apply to the initial connection request (e.g., 429/503). 
+    Mid-stream drops are not retried to prevent partial context duplication.
     """
-    logger.info("Executing LLM API call...")
-    response = model.generate_content(
+    logger.info("Initiating streaming LLM API call...")
+    return model.generate_content(
         prompt,
         generation_config=genai.types.GenerationConfig(
             temperature=0.2,
             # No max_output_tokens cap — allows full reports for large log files
-        )
+        ),
+        stream=True
     )
-    return response.text
 
-def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> str:
+def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> Generator[str, None, None]:
     """
     Analyzes system logs using the Gemini LLM to generate or revise an RCA report.
+    Returns a generator that yields text chunks for streaming.
     """
     if not log_text or not log_text.strip():
         raise ValueError("Log text cannot be empty.")
 
+    # Preprocess logs: Add explicit line numbers to ensure 100% accurate citations
     lines = log_text.strip().split('\n')
     numbered_logs = "\n".join([f"Line {i+1}: {line}" for i, line in enumerate(lines)])
 
@@ -115,9 +120,12 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> str:
         )
 
     try:
-        # Initialize the model (using gemini-3.5-flash for speed and cost-efficiency)
         model = genai.GenerativeModel('gemini-3.5-flash')
-        return _execute_llm_call(model, full_prompt)
+        response_stream = _initiate_stream(model, full_prompt)
+        
+        for chunk in response_stream:
+            if chunk.text:
+                yield chunk.text
 
     except RetryError as e:
         logger.error(f"API call failed after multiple retries: {e}")
@@ -142,14 +150,16 @@ if __name__ == '__main__':
 
         print(f"--- INITIATING TEST RUN WITH {log_file} ---")
 
-        rca_report = analyze_incident(log_text=mock_logs)
+        response_gen = analyze_incident(log_text=mock_logs)
+        rca_report = "".join(list(response_gen))
         with open('rca_report.md', 'w', encoding='utf-8') as f:
             f.write(rca_report)
         print("\n--- INITIAL RCA REPORT GENERATED: rca_report.md ---")
 
         print("\n--- INITIATING REVISION TEST ---")
         feedback = "The timeline is good, but in the Action Items, please specifically mention adding an alert for DB connection pool utilization exceeding 80%."
-        revised_report = analyze_incident(log_text=mock_logs, user_feedback=feedback)
+        response_gen_rev = analyze_incident(log_text=mock_logs, user_feedback=feedback)
+        revised_report = "".join(list(response_gen_rev))
         with open('rca_report_revised.md', 'w', encoding='utf-8') as f:
             f.write(revised_report)
         print("\n--- REVISED RCA REPORT GENERATED: rca_report_revised.md ---")
