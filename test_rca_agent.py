@@ -2,8 +2,8 @@
 test_rca_agent.py
 
 Test suite for the Incident RCA Agent core logic.
-Mocks the Google Generative AI API to ensure zero quota consumption during CI/CD.
-Updated for the two-call pipeline architecture.
+Mocks the Google GenAI SDK to ensure zero quota consumption during CI/CD.
+Updated for the two-call pipeline architecture and google-genai SDK.
 """
 
 import os
@@ -12,19 +12,17 @@ os.environ["GOOGLE_API_KEY"] = "dummy_api_key_for_testing"
 
 import pytest
 from unittest.mock import patch, MagicMock, call
-from google.api_core.exceptions import TooManyRequests, ServiceUnavailable
+from google.genai.errors import APIError
 
 import rca_agent
 
 ACTION_ITEMS_JSON = '```json\n[{"Title": "Fix DB index", "Description": "Add index.", "Priority": "High", "Assignee": "DBA"}]\n```'
 
 @pytest.fixture
-def mock_genai_model():
-    """Fixture to mock the Gemini GenerativeModel."""
-    with patch('rca_agent.genai.GenerativeModel') as mock_model_class:
-        mock_instance = MagicMock()
-        mock_model_class.return_value = mock_instance
-        yield mock_instance
+def mock_genai_client():
+    """Fixture to mock the Gemini GenAI Client."""
+    with patch('rca_agent.client') as mock_client:
+        yield mock_client
 
 def mock_stream_chunks(chunks):
     """Helper to produce a list of mock streaming chunks."""
@@ -41,8 +39,14 @@ def mock_blocking_response(text):
     mock_resp.text = text
     return mock_resp
 
+def create_api_error(message, code):
+    """Helper to create a google.genai.errors.APIError"""
+    err = APIError(message, code, "HTTP/1.1 429 Too Many Requests")
+    err.code = code
+    return err
+
 @patch('time.sleep', return_value=None)
-def test_analyze_incident_success(mock_sleep, mock_genai_model):
+def test_analyze_incident_success(mock_sleep, mock_genai_client):
     """Test the two-call pipeline produces a full report with all required sections."""
     # Call 1: streaming narrative
     stream_chunks = mock_stream_chunks([
@@ -53,7 +57,8 @@ def test_analyze_incident_success(mock_sleep, mock_genai_model):
     # Call 2: blocking action items
     blocking_resp = mock_blocking_response(ACTION_ITEMS_JSON)
 
-    mock_genai_model.generate_content.side_effect = [stream_chunks, blocking_resp]
+    mock_genai_client.models.generate_content_stream.return_value = stream_chunks
+    mock_genai_client.models.generate_content.return_value = blocking_resp
 
     # Act
     result = "".join(list(rca_agent.analyze_incident("Line 1: Crash\nLine 2: OOM")))
@@ -64,52 +69,54 @@ def test_analyze_incident_success(mock_sleep, mock_genai_model):
     assert "## Root Cause" in result
     assert "## Action Items" in result
     assert "```json" in result
-    assert mock_genai_model.generate_content.call_count == 2
+    assert mock_genai_client.models.generate_content_stream.call_count == 1
+    assert mock_genai_client.models.generate_content.call_count == 1
 
 @patch('time.sleep', return_value=None)
-def test_analyze_incident_retries_on_429(mock_sleep, mock_genai_model):
-    """Test that _initiate_stream retries up to 3 times on 429 errors."""
+def test_analyze_incident_retries_on_api_error(mock_sleep, mock_genai_client):
+    """Test that _initiate_stream retries up to 3 times on API errors."""
     stream_chunks = mock_stream_chunks(["## Executive Summary\nSuccess after retries."])
     blocking_resp = mock_blocking_response(ACTION_ITEMS_JSON)
 
     # Narrative call: fail twice, succeed third time. Action items: succeed immediately.
-    mock_genai_model.generate_content.side_effect = [
-        TooManyRequests("429 Rate Limit"),
-        TooManyRequests("429 Rate Limit"),
+    mock_genai_client.models.generate_content_stream.side_effect = [
+        create_api_error("429 Rate Limit", 429),
+        create_api_error("429 Rate Limit", 429),
         stream_chunks,
-        blocking_resp,
     ]
+    mock_genai_client.models.generate_content.return_value = blocking_resp
 
     result = "".join(list(rca_agent.analyze_incident("Dummy logs")))
 
     assert "Success after retries" in result
-    # 2 failures + 1 success for narrative + 1 for action items = 4 calls
-    assert mock_genai_model.generate_content.call_count == 4
+    assert mock_genai_client.models.generate_content_stream.call_count == 3
+    assert mock_genai_client.models.generate_content.call_count == 1
 
 @patch('time.sleep', return_value=None)
-def test_analyze_incident_fails_after_max_retries(mock_sleep, mock_genai_model):
-    """Test that APICallFailedError is raised after 3 consecutive 503 errors."""
-    mock_genai_model.generate_content.side_effect = ServiceUnavailable("503 Unavailable")
+def test_analyze_incident_fails_after_max_retries(mock_sleep, mock_genai_client):
+    """Test that APICallFailedError is raised after 3 consecutive errors."""
+    mock_genai_client.models.generate_content_stream.side_effect = create_api_error("503 Unavailable", 503)
 
     with pytest.raises(rca_agent.APICallFailedError):
         list(rca_agent.analyze_incident("Dummy logs"))
 
-    assert mock_genai_model.generate_content.call_count == 3
+    assert mock_genai_client.models.generate_content_stream.call_count == 3
 
 def test_analyze_incident_empty_logs():
     """Test that a ValueError is raised if empty logs are provided."""
     with pytest.raises(ValueError, match="Log text cannot be empty"):
         list(rca_agent.analyze_incident(""))
 
-def test_analyze_incident_includes_user_feedback(mock_genai_model):
+def test_analyze_incident_includes_user_feedback(mock_genai_client):
     """Test that user feedback is correctly injected into the narrative prompt."""
     stream_chunks = mock_stream_chunks(["Revised narrative report."])
     blocking_resp = mock_blocking_response(ACTION_ITEMS_JSON)
-    mock_genai_model.generate_content.side_effect = [stream_chunks, blocking_resp]
+    mock_genai_client.models.generate_content_stream.return_value = stream_chunks
+    mock_genai_client.models.generate_content.return_value = blocking_resp
 
     list(rca_agent.analyze_incident("Dummy logs", user_feedback="Fix the timeline."))
 
-    # The first call (narrative) should contain the feedback
-    first_call_args = mock_genai_model.generate_content.call_args_list[0][0][0]
-    assert "Fix the timeline." in first_call_args
-    assert "Human Feedback:" in first_call_args
+    # The first call (narrative) should contain the feedback in the contents parameter
+    first_call_kwargs = mock_genai_client.models.generate_content_stream.call_args_list[0][1]
+    assert "Fix the timeline." in first_call_kwargs['contents']
+    assert "Human Feedback:" in first_call_kwargs['contents']

@@ -15,9 +15,9 @@ import os
 import logging
 from typing import Optional, Generator
 from dotenv import load_dotenv
-import google.generativeai as genai
-from google.api_core import exceptions as google_exceptions
-from google.api_core.exceptions import TooManyRequests, ServiceUnavailable, ResourceExhausted
+from google import genai
+from google.genai import types
+from google.genai.errors import APIError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
 
 # Configure logging
@@ -32,7 +32,8 @@ API_KEY = os.environ.get("GOOGLE_API_KEY")
 if not API_KEY:
     raise ValueError("GOOGLE_API_KEY not found in environment")
 
-genai.configure(api_key=API_KEY)
+# Initialize the new SDK client
+client = genai.Client(api_key=API_KEY)
 
 class APICallFailedError(Exception):
     """Custom exception raised when the LLM API call fails after all retry attempts."""
@@ -89,31 +90,32 @@ Human Feedback:
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type((TooManyRequests, ServiceUnavailable, ResourceExhausted)),
+    retry=retry_if_exception_type(APIError),
     reraise=True
 )
-def _initiate_stream(model: genai.GenerativeModel, prompt: str):
+def _initiate_stream(prompt: str):
     """Initiates a streaming LLM call. Tenacity retries protect the initial connection."""
     logger.info("Initiating streaming LLM API call (narrative)...")
-    return model.generate_content(
-        prompt,
-        generation_config=genai.types.GenerationConfig(temperature=0.2),
-        stream=True
+    return client.models.generate_content_stream(
+        model='gemini-2.5-flash',
+        contents=prompt,
+        config=types.GenerateContentConfig(temperature=0.2)
     )
 
 @retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type((TooManyRequests, ServiceUnavailable, ResourceExhausted)),
+    retry=retry_if_exception_type(APIError),
     reraise=True
 )
-def _generate_action_items(model: genai.GenerativeModel, narrative: str) -> str:
+def _generate_action_items(narrative: str) -> str:
     """Blocking call to generate the JSON action items from the completed narrative."""
     logger.info("Generating structured JSON action items (blocking call)...")
     prompt = ACTION_ITEMS_PROMPT.format(narrative=narrative)
-    response = model.generate_content(
-        prompt,
-        generation_config=genai.types.GenerationConfig(
+    response = client.models.generate_content(
+        model='gemini-2.5-flash',
+        contents=prompt,
+        config=types.GenerateContentConfig(
             temperature=0.1,
             max_output_tokens=1024
         )
@@ -151,23 +153,29 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> Gene
         )
 
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-
         # --- CALL 1: Stream the narrative ---
-        response_stream = _initiate_stream(model, narrative_prompt)
+        response_stream = _initiate_stream(narrative_prompt)
         narrative_chunks = []
 
         for chunk in response_stream:
-            if chunk.text:
-                narrative_chunks.append(chunk.text)
-                yield chunk.text
+            # Catch mid-stream rate limit errors (Tenacity only protects the initial connection)
+            try:
+                if chunk.text:
+                    narrative_chunks.append(chunk.text)
+                    yield chunk.text
+            except APIError as e:
+                logger.error(f"Stream interrupted mid-response by API error: {e}")
+                raise APICallFailedError(
+                    "The stream was interrupted by an API error (e.g. rate limit). "
+                    "Please wait a moment and try again."
+                ) from e
 
         narrative = "".join(narrative_chunks)
         logger.info(f"Narrative complete. Length: {len(narrative)} chars.")
 
         # --- CALL 2: Generate structured Action Items (blocking) ---
         yield "\n\n## Action Items\n\n"
-        action_items_text = _generate_action_items(model, narrative)
+        action_items_text = _generate_action_items(narrative)
         yield action_items_text
         logger.info("Action items generated successfully.")
 
@@ -179,7 +187,7 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> Gene
         ) from e
     except APICallFailedError:
         raise
-    except google_exceptions.GoogleAPIError as e:
+    except APIError as e:
         logger.error(f"Google API Error during RCA generation: {e}")
         raise APICallFailedError(f"Failed to communicate with the AI service: {e}") from e
     except Exception as e:
