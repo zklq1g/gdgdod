@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 def extract_json_block(rca_markdown: str) -> Optional[str]:
     """
-    Extracts the JSON string from a markdown code block.
+    Extracts the JSON string from a markdown code block or raw text.
 
     Args:
         rca_markdown (str): The full RCA report in Markdown format.
@@ -26,12 +26,32 @@ def extract_json_block(rca_markdown: str) -> Optional[str]:
     Returns:
         Optional[str]: The raw JSON string if found, otherwise None.
     """
-    # Regex to find ```json ... ``` allowing for whitespace and case insensitivity
+    # 1. Standard regex to find ```json ... ``` allowing for whitespace and case insensitivity
     pattern = r"```json\s*(.*?)\s*```"
     match = re.search(pattern, rca_markdown, re.IGNORECASE | re.DOTALL)
-    
     if match:
         return match.group(1).strip()
+    
+    # 2. Fallback: Find ```json and read to the end of string or next ```
+    idx = rca_markdown.lower().find("```json")
+    if idx != -1:
+        content = rca_markdown[idx + 7:]
+        end_idx = content.find("```")
+        if end_idx != -1:
+            return content[:end_idx].strip()
+        return content.strip()
+        
+    # 3. Fallback: Directly extract array bounded by [ and ] if it looks like JSON
+    array_start = rca_markdown.find("[")
+    array_end = rca_markdown.rfind("]")
+    if array_start != -1 and array_end != -1 and array_end > array_start:
+        candidate = rca_markdown[array_start:array_end+1]
+        try:
+            json.loads(candidate)
+            return candidate.strip()
+        except Exception:
+            pass
+
     return None
 
 def generate_jira_tickets(rca_markdown: str) -> pd.DataFrame:
