@@ -88,23 +88,24 @@ Human Feedback:
 # --- API HELPERS ---
 
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=2, min=10, max=60),
     retry=retry_if_exception_type(APIError),
     reraise=True
 )
-def _initiate_stream(prompt: str):
-    """Initiates a streaming LLM call. Tenacity retries protect the initial connection."""
-    logger.info("Initiating streaming LLM API call (narrative)...")
-    return client.models.generate_content_stream(
+def _generate_narrative(prompt: str) -> str:
+    """Blocking call to generate the narrative report. Tenacity retries protect it."""
+    logger.info("Generating narrative report (blocking call)...")
+    response = client.models.generate_content(
         model='gemini-2.5-flash',
         contents=prompt,
         config=types.GenerateContentConfig(temperature=0.2)
     )
+    return response.text
 
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10),
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=2, min=10, max=60),
     retry=retry_if_exception_type(APIError),
     reraise=True
 )
@@ -153,24 +154,9 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> Gene
         )
 
     try:
-        # --- CALL 1: Stream the narrative ---
-        response_stream = _initiate_stream(narrative_prompt)
-        narrative_chunks = []
-
-        for chunk in response_stream:
-            # Catch mid-stream rate limit errors (Tenacity only protects the initial connection)
-            try:
-                if chunk.text:
-                    narrative_chunks.append(chunk.text)
-                    yield chunk.text
-            except APIError as e:
-                logger.error(f"Stream interrupted mid-response by API error: {e}")
-                raise APICallFailedError(
-                    "The stream was interrupted by an API error (e.g. rate limit). "
-                    "Please wait a moment and try again."
-                ) from e
-
-        narrative = "".join(narrative_chunks)
+        # --- CALL 1: Generate the narrative (blocking) ---
+        narrative = _generate_narrative(narrative_prompt)
+        yield narrative
         logger.info(f"Narrative complete. Length: {len(narrative)} chars.")
 
         # --- CALL 2: Generate structured Action Items (blocking) ---
