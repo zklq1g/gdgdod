@@ -118,19 +118,29 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> Gene
         )
 
     try:
-        model = genai.GenerativeModel('gemini-3.5-flash')
+        model = genai.GenerativeModel('gemini-1.5-flash')
         response_stream = _initiate_stream(model, full_prompt)
         
         for chunk in response_stream:
-            if chunk.text:
-                yield chunk.text
+            # Catch mid-stream rate limit errors (Tenacity only protects the initial connection)
+            try:
+                if chunk.text:
+                    yield chunk.text
+            except (ResourceExhausted, TooManyRequests, ServiceUnavailable) as e:
+                logger.error(f"Stream interrupted mid-response by API error: {e}")
+                raise APICallFailedError(
+                    "The stream was interrupted by a rate limit error. "
+                    "Please wait 60 seconds and try again."
+                ) from e
 
     except RetryError as e:
         logger.error(f"API call failed after multiple retries: {e}")
         raise APICallFailedError(
-            "The AI service is currently experiencing high traffic or is temporarily unavailable. "
+            "The AI service is currently unavailable after multiple retries. "
             "Please wait a moment and try again."
         ) from e
+    except APICallFailedError:
+        raise  # Re-raise without wrapping
     except google_exceptions.GoogleAPIError as e:
         logger.error(f"Google API Error during RCA generation: {e}")
         raise APICallFailedError(f"Failed to communicate with the AI service: {e}") from e

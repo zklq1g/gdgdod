@@ -114,9 +114,17 @@ if st.session_state.status == 'uploaded':
             response_generator = rca_agent.analyze_incident(st.session_state.logs)
             with st.spinner("Connecting to AI service..."):
                 full_report = st.write_stream(response_generator)
-            st.session_state.rca_report = full_report
-            st.session_state.status = 'generated'
-            st.rerun()
+            # Validate the report is complete before advancing state
+            if "```json" not in full_report:
+                st.error(
+                    "The report was cut off before the Action Items were generated. "
+                    "This is usually caused by an API rate limit mid-stream. "
+                    "Please wait 60 seconds and try again."
+                )
+            else:
+                st.session_state.rca_report = full_report
+                st.session_state.status = 'generated'
+                st.rerun()
         except rca_agent.APICallFailedError as e:
             st.error(str(e))
         except Exception as e:
