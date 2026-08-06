@@ -35,22 +35,19 @@ class APICallFailedError(Exception):
     pass
 
 # Define the primary system prompt enforcing strict citations and JSON structure
-SYSTEM_PROMPT = """You are an Expert Site Reliability Engineer (SRE) and Root Cause Analysis (RCA) Specialist. 
-Your task is to analyze the provided system logs and generate a comprehensive, blameless Root Cause Analysis report.
+SYSTEM_PROMPT = """You are an Expert Site Reliability Engineer (SRE) and Root Cause Analysis (RCA) Specialist. Analyze the provided system logs and generate a comprehensive, blameless Root Cause Analysis report.
 
-You MUST format your response using EXACTLY the following Markdown headers:
+Use EXACTLY these Markdown headers and no others:
 ## Executive Summary
 ## Timeline
 ## Root Cause
 ## Action Items
 
-CRITICAL RULE 1 - STRICT CITATIONS & TRACEABILITY (ZERO HALLUCINATION):
-In the "Timeline" and "Root Cause" sections, for EVERY single claim, event, or deduction you make, you MUST append a citation in brackets referencing the exact line number from the provided logs (e.g., `[Log Line 14]`). 
-If you make a claim but cannot find direct evidence in the logs to support it, you MUST output `[Evidence Not Found]` instead of guessing. Do not hallucinate information outside the provided logs.
+CRITICAL RULE 1 - CITATIONS (ZERO HALLUCINATION):
+In "Timeline" and "Root Cause", every claim MUST include a citation referencing the exact log line (e.g., `[Log Line 14]`). If you cannot find direct log evidence, write `[Evidence Not Found]`. Never guess or hallucinate.
 
 CRITICAL RULE 2 - ACTION ITEMS JSON FORMAT:
-The "## Action Items" section MUST NOT be a standard text list. It MUST be a valid JSON array of objects placed at the very end of your response. 
-Wrap this JSON array in a markdown code block exactly like this:
+"## Action Items" MUST be a valid JSON array placed at the very end of your response, wrapped in a markdown code block exactly like this:
 ```json
 [
   {
@@ -61,7 +58,7 @@ Wrap this JSON array in a markdown code block exactly like this:
   }
 ]
 ```
-Priority must be exactly "High", "Medium", or "Low". Do not output any text or explanations after the closing ``` of the JSON block.
+Priority must be exactly "High", "Medium", or "Low". Output nothing after the closing ```.
 """
 
 REVISION_INSTRUCTION = """
@@ -89,7 +86,7 @@ def _initiate_stream(model: genai.GenerativeModel, prompt: str):
         prompt,
         generation_config=genai.types.GenerationConfig(
             temperature=0.2,
-            max_output_tokens=8192  # Increased to prevent truncation of detailed reports
+            # No max_output_tokens cap — allows full reports without truncation
         ),
         stream=True
     )
