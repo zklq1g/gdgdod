@@ -4,7 +4,11 @@ rca_agent.py
 The Core Brain of the Incident RCA Agent.
 Handles interaction with the Google Gemini API to analyze system logs,
 generate structured Root Cause Analysis (RCA) reports, and process human revisions.
-Supports streaming responses for real-time UI rendering.
+
+Architecture: Two-call pipeline.
+  Call 1 (streaming): Generates the narrative report (Executive Summary, Timeline, Root Cause).
+  Call 2 (blocking):  Generates the structured JSON Action Items from the completed narrative.
+This guarantees the JSON block is always produced regardless of log file size.
 """
 
 import os
@@ -34,40 +38,53 @@ class APICallFailedError(Exception):
     """Custom exception raised when the LLM API call fails after all retry attempts."""
     pass
 
-# Define the primary system prompt enforcing strict citations and JSON structure
-SYSTEM_PROMPT = """You are an Expert Site Reliability Engineer (SRE) and Root Cause Analysis (RCA) Specialist. Analyze the provided system logs and generate a comprehensive, blameless Root Cause Analysis report.
+# --- PROMPTS ---
+
+# Call 1: Narrative report (no JSON required — keeps output budget free)
+NARRATIVE_PROMPT = """You are an Expert Site Reliability Engineer (SRE) and Root Cause Analysis (RCA) Specialist. Analyze the provided system logs and generate a blameless Root Cause Analysis report.
 
 Use EXACTLY these Markdown headers and no others:
 ## Executive Summary
 ## Timeline
 ## Root Cause
-## Action Items
 
-CRITICAL RULE 1 - CITATIONS (ZERO HALLUCINATION):
-In "Timeline" and "Root Cause", every claim MUST include a citation referencing the exact log line (e.g., `[Log Line 14]`). If you cannot find direct log evidence, write `[Evidence Not Found]`. Never guess or hallucinate.
+CITATIONS RULE (ZERO HALLUCINATION):
+In "Timeline" and "Root Cause", every claim MUST cite the exact log line (e.g., `[Log Line 14]`). If no log evidence exists, write `[Evidence Not Found]`. Never hallucinate.
 
-CRITICAL RULE 2 - ACTION ITEMS JSON FORMAT:
-"## Action Items" MUST be a valid JSON array placed at the very end of your response, wrapped in a markdown code block exactly like this:
+Be concise. Do not pad sections unnecessarily.
+"""
+
+# Call 2: Action items JSON extracted from the narrative
+ACTION_ITEMS_PROMPT = """You are an SRE producing Jira tickets from a completed RCA report.
+
+Based on the following RCA report, produce ONLY a JSON array of action items. No other text, no explanation, no markdown prose — output the JSON array only, wrapped in a ```json block.
+
+Schema:
 ```json
 [
-  {
-    "Title": "Concise task summary",
-    "Description": "Detailed explanation of what needs to be done and why.",
+  {{
+    "Title": "Concise task title",
+    "Description": "What must be done and why, referencing the RCA findings.",
     "Priority": "High",
     "Assignee": "Role (e.g., Backend Eng, DevOps, DBA)"
-  }
+  }}
 ]
 ```
 Priority must be exactly "High", "Medium", or "Low". Output nothing after the closing ```.
+
+RCA REPORT:
+{narrative}
 """
 
 REVISION_INSTRUCTION = """
-The human engineer has reviewed your previous RCA report and provided the following feedback. 
-Please regenerate the ENTIRE report, incorporating this feedback while strictly maintaining the Markdown structure, the CRITICAL RULE 1 for citations, and CRITICAL RULE 2 for the JSON Action Items format.
+The human engineer has reviewed your previous RCA report and provided the following feedback.
+Regenerate the ENTIRE report (## Executive Summary, ## Timeline, ## Root Cause) incorporating this feedback while maintaining citations.
 
 Human Feedback:
 {feedback}
 """
+
+# --- API HELPERS ---
 
 @retry(
     stop=stop_after_attempt(3),
@@ -76,62 +93,83 @@ Human Feedback:
     reraise=True
 )
 def _initiate_stream(model: genai.GenerativeModel, prompt: str):
-    """
-    Internal helper function to execute the LLM API call with Tenacity retry logic.
-    Note: Retries only apply to the initial connection request (e.g., 429/503). 
-    Mid-stream drops are not retried to prevent partial context duplication.
-    """
-    logger.info("Initiating streaming LLM API call...")
+    """Initiates a streaming LLM call. Tenacity retries protect the initial connection."""
+    logger.info("Initiating streaming LLM API call (narrative)...")
     return model.generate_content(
         prompt,
-        generation_config=genai.types.GenerationConfig(
-            temperature=0.2,
-            # No max_output_tokens cap — allows full reports without truncation
-        ),
+        generation_config=genai.types.GenerationConfig(temperature=0.2),
         stream=True
     )
 
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    retry=retry_if_exception_type((TooManyRequests, ServiceUnavailable, ResourceExhausted)),
+    reraise=True
+)
+def _generate_action_items(model: genai.GenerativeModel, narrative: str) -> str:
+    """Blocking call to generate the JSON action items from the completed narrative."""
+    logger.info("Generating structured JSON action items (blocking call)...")
+    prompt = ACTION_ITEMS_PROMPT.format(narrative=narrative)
+    response = model.generate_content(
+        prompt,
+        generation_config=genai.types.GenerationConfig(
+            temperature=0.1,
+            max_output_tokens=1024
+        )
+    )
+    return response.text
+
+# --- PUBLIC API ---
+
 def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> Generator[str, None, None]:
     """
-    Analyzes system logs using the Gemini LLM to generate or revise an RCA report.
-    Returns a generator that yields text chunks for streaming.
+    Analyzes system logs using a two-call pipeline:
+      1. Streams the narrative RCA (Executive Summary, Timeline, Root Cause).
+      2. Makes a blocking call to generate the JSON Action Items section.
+    Yields text chunks for real-time streaming to the UI.
     """
     if not log_text or not log_text.strip():
         raise ValueError("Log text cannot be empty.")
 
-    # Preprocess logs: Add explicit line numbers to ensure 100% accurate citations
+    # Add explicit line numbers for 100% accurate citations
     lines = log_text.strip().split('\n')
     numbered_logs = "\n".join([f"Line {i+1}: {line}" for i, line in enumerate(lines)])
 
     if user_feedback:
         logger.info("Preparing revised RCA prompt based on human feedback.")
-        full_prompt = (
-            f"{SYSTEM_PROMPT}\n\n"
+        narrative_prompt = (
+            f"{NARRATIVE_PROMPT}\n\n"
             f"{REVISION_INSTRUCTION.format(feedback=user_feedback)}\n\n"
             f"ORIGINAL LOGS:\n{numbered_logs}"
         )
     else:
         logger.info("Preparing initial RCA prompt.")
-        full_prompt = (
-            f"{SYSTEM_PROMPT}\n\n"
+        narrative_prompt = (
+            f"{NARRATIVE_PROMPT}\n\n"
             f"LOGS TO ANALYZE:\n{numbered_logs}"
         )
 
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
-        response_stream = _initiate_stream(model, full_prompt)
-        
+
+        # --- CALL 1: Stream the narrative ---
+        response_stream = _initiate_stream(model, narrative_prompt)
+        narrative_chunks = []
+
         for chunk in response_stream:
-            # Catch mid-stream rate limit errors (Tenacity only protects the initial connection)
-            try:
-                if chunk.text:
-                    yield chunk.text
-            except (ResourceExhausted, TooManyRequests, ServiceUnavailable) as e:
-                logger.error(f"Stream interrupted mid-response by API error: {e}")
-                raise APICallFailedError(
-                    "The stream was interrupted by a rate limit error. "
-                    "Please wait 60 seconds and try again."
-                ) from e
+            if chunk.text:
+                narrative_chunks.append(chunk.text)
+                yield chunk.text
+
+        narrative = "".join(narrative_chunks)
+        logger.info(f"Narrative complete. Length: {len(narrative)} chars.")
+
+        # --- CALL 2: Generate structured Action Items (blocking) ---
+        yield "\n\n## Action Items\n\n"
+        action_items_text = _generate_action_items(model, narrative)
+        yield action_items_text
+        logger.info("Action items generated successfully.")
 
     except RetryError as e:
         logger.error(f"API call failed after multiple retries: {e}")
@@ -140,7 +178,7 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> Gene
             "Please wait a moment and try again."
         ) from e
     except APICallFailedError:
-        raise  # Re-raise without wrapping
+        raise
     except google_exceptions.GoogleAPIError as e:
         logger.error(f"Google API Error during RCA generation: {e}")
         raise APICallFailedError(f"Failed to communicate with the AI service: {e}") from e
@@ -163,14 +201,6 @@ if __name__ == '__main__':
         with open('rca_report.md', 'w', encoding='utf-8') as f:
             f.write(rca_report)
         print("\n--- INITIAL RCA REPORT GENERATED: rca_report.md ---")
-
-        print("\n--- INITIATING REVISION TEST ---")
-        feedback = "The timeline is good, but in the Action Items, please specifically mention adding an alert for DB connection pool utilization exceeding 80%."
-        response_gen_rev = analyze_incident(log_text=mock_logs, user_feedback=feedback)
-        revised_report = "".join(list(response_gen_rev))
-        with open('rca_report_revised.md', 'w', encoding='utf-8') as f:
-            f.write(revised_report)
-        print("\n--- REVISED RCA REPORT GENERATED: rca_report_revised.md ---")
 
     except FileNotFoundError:
         logger.error("Log file not found. Please ensure mock_logs.txt or massive_mock_logs.txt exists.")
