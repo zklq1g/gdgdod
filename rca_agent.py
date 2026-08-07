@@ -71,7 +71,14 @@ Schema:
   }}
 ]
 ```
-Priority must be exactly "High", "Medium", or "Low". Output nothing after the closing ```.
+
+CRITICAL JSON FORMATTING RULES:
+1. Do not use literal line breaks inside JSON string values. Use the escaped sequence \\n instead.
+2. Do not include markdown formatting (like **bold** or *italics*) inside the JSON strings.
+3. Ensure all double quotes inside strings are escaped as \\".
+4. Output nothing after the closing ```.
+
+Priority must be exactly "High", "Medium", or "Low".
 
 RCA REPORT:
 {narrative}
@@ -93,15 +100,48 @@ Human Feedback:
     retry=retry_if_exception_type(APIError),
     reraise=True
 )
-def _generate_narrative(prompt: str) -> str:
-    """Blocking call to generate the narrative report. Tenacity retries protect it."""
-    logger.info("Generating narrative report (blocking call)...")
-    response = client.models.generate_content(
+def _init_narrative_stream(prompt: str):
+    """
+    Initializes the streaming API call.
+    Tenacity retries protect the initial connection/request.
+    """
+    logger.info("Initializing narrative report stream...")
+    return client.models.generate_content_stream(
         model='gemini-2.5-flash',
         contents=prompt,
         config=types.GenerateContentConfig(temperature=0.2)
     )
-    return response.text
+
+def _generate_narrative_stream(prompt: str) -> Generator[str, None, None]:
+    """
+    Streaming generator for the narrative report.
+    Yields text chunks for real-time UI rendering.
+    """
+    try:
+        stream = _init_narrative_stream(prompt)
+        last_chunk = None
+
+        for chunk in stream:
+            if chunk.text:
+                yield chunk.text
+            last_chunk = chunk
+
+        # Log token usage from the final chunk of the stream
+        if last_chunk and hasattr(last_chunk, 'usage_metadata') and last_chunk.usage_metadata:
+            usage = last_chunk.usage_metadata
+            logger.info(
+                f"Narrative Stream Token Usage - "
+                f"Prompt: {usage.prompt_token_count}, "
+                f"Candidates: {usage.candidates_token_count}, "
+                f"Total: {usage.total_token_count}"
+            )
+
+    except APIError as e:
+        logger.error(f"Google API Error during narrative streaming: {e}")
+        raise APICallFailedError(f"Failed to communicate with the AI service: {e}") from e
+    except Exception as e:
+        logger.error(f"Unexpected error during narrative streaming: {e}")
+        raise APICallFailedError(f"An unexpected system error occurred: {e}") from e
 
 @retry(
     stop=stop_after_attempt(5),
@@ -121,6 +161,17 @@ def _generate_action_items(narrative: str) -> str:
             max_output_tokens=1024
         )
     )
+
+    # Log token usage for the blocking call
+    if hasattr(response, 'usage_metadata') and response.usage_metadata:
+        usage = response.usage_metadata
+        logger.info(
+            f"Action Items Token Usage - "
+            f"Prompt: {usage.prompt_token_count}, "
+            f"Candidates: {usage.candidates_token_count}, "
+            f"Total: {usage.total_token_count}"
+        )
+
     return response.text
 
 # --- PUBLIC API ---
@@ -154,14 +205,20 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> Gene
         )
 
     try:
-        # --- CALL 1: Generate the narrative (blocking) ---
-        narrative = _generate_narrative(narrative_prompt)
-        yield narrative
-        logger.info(f"Narrative complete. Length: {len(narrative)} chars.")
+        # --- CALL 1: Generate the narrative (streaming) ---
+        # We must collect the chunks to pass the full narrative to Call 2,
+        # while simultaneously yielding them to the UI for the streaming effect.
+        narrative_chunks = []
+        for chunk in _generate_narrative_stream(narrative_prompt):
+            narrative_chunks.append(chunk)
+            yield chunk
+
+        full_narrative = "".join(narrative_chunks)
+        logger.info(f"Narrative stream complete. Length: {len(full_narrative)} chars.")
 
         # --- CALL 2: Generate structured Action Items (blocking) ---
         yield "\n\n## Action Items\n\n"
-        action_items_text = _generate_action_items(narrative)
+        action_items_text = _generate_action_items(full_narrative)
         yield action_items_text
         logger.info("Action items generated successfully.")
 
@@ -173,9 +230,6 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> Gene
         ) from e
     except APICallFailedError:
         raise
-    except APIError as e:
-        logger.error(f"Google API Error during RCA generation: {e}")
-        raise APICallFailedError(f"Failed to communicate with the AI service: {e}") from e
     except Exception as e:
         logger.error(f"Unexpected error during RCA generation: {e}")
         raise APICallFailedError(f"An unexpected system error occurred: {e}") from e
