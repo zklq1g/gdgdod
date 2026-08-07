@@ -130,17 +130,40 @@ if st.session_state.status in ['generated', 'revision', 'approved', 'jira']:
         st.markdown(st.session_state.rca_report)
     st.divider()
 
+    # Check if Action Items were successfully generated in the report
+    has_action_items = "```json" in st.session_state.rca_report
+
     # Action Buttons (Only show if not yet approved)
     if st.session_state.status in ['generated', 'revision']:
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Approve Report", use_container_width=True):
-                st.session_state.status = 'approved'
-                st.rerun()
-        with col2:
-            if st.button("Request Revision", use_container_width=True):
-                st.session_state.status = 'revision'
-                st.rerun()
+
+        # --- FALLBACK: Missing Action Items ---
+        if not has_action_items:
+            st.error("⚠️ **Action Items Missing:** The AI failed to generate the structured JSON action items (likely due to output truncation). You can regenerate just the action items without re-running the full report.")
+            if st.button("Regenerate Action Items Only", type="primary", use_container_width=True):
+                with st.spinner("Generating action items..."):
+                    try:
+                        import time
+                        time.sleep(2)  # Throttle for free tier RPM limits
+                        action_items_text = rca_agent.regenerate_action_items(st.session_state.rca_report)
+                        # Append the newly generated JSON to the existing report
+                        st.session_state.rca_report += f"\n\n## Action Items\n\n{action_items_text}"
+                        st.rerun()
+                    except rca_agent.APICallFailedError as e:
+                        st.error(str(e))
+                    except Exception as e:
+                        st.error(f"Failed to generate action items: {str(e)}")
+
+        # --- NORMAL FLOW: Action Items Exist ---
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Approve Report", use_container_width=True):
+                    st.session_state.status = 'approved'
+                    st.rerun()
+            with col2:
+                if st.button("Request Revision", use_container_width=True):
+                    st.session_state.status = 'revision'
+                    st.rerun()
 
     # Revision Flow (Streaming)
     if st.session_state.status == 'revision':
