@@ -90,10 +90,15 @@ Use EXACTLY these Markdown headers and no others:
 ## Timeline
 ## Root Cause
 
+STRICT TOKEN OPTIMIZATION & FORMATTING RULES:
+1. Executive Summary: Maximum 1 short paragraph. Focus only on core impact and resolution. No fluff.
+2. Timeline: Use a dense, bulleted list. Format strictly as: `- [HH:MM:SS] - [Brief event] [Log Line X]`. 
+   - Do NOT write full sentences. Use telegraphic phrasing.
+   - Group rapid, related events into a single bullet to save tokens (e.g., `- [08:17:01-08:17:02] - DB connection timeouts and pool exceptions [Log Line 10] [Log Line 11]`).
+3. Root Cause: Use short, punchy bullet points. No narrative padding.
+
 CITATIONS RULE (ZERO HALLUCINATION):
 In "Timeline" and "Root Cause", every claim MUST cite the exact log line (e.g., `[Log Line 14]`). If no log evidence exists, write `[Evidence Not Found]`. Never hallucinate.
-
-Be concise. Do not pad sections unnecessarily.
 """
 
 ACTION_ITEMS_PROMPT = """You are an SRE producing Jira tickets from a completed RCA report.
