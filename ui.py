@@ -128,20 +128,41 @@ if st.session_state.status in ['generated', 'revision', 'approved', 'jira']:
     st.subheader("2. Analysis Output")
     
     with st.container(border=True):
-        st.markdown(st.session_state.rca_report)
+        report_text = st.session_state.rca_report
+        
+        # Check if the report contains the Action Items section
+        if "## Action Items" in report_text:
+            # Split the report into Narrative and Action Items
+            narrative_part, action_items_part = report_text.split("## Action Items", 1)
+            
+            # 1. Render the Narrative beautifully as standard Markdown
+            st.markdown(narrative_part)
+            
+            # 2. Render the Action Items as a clean, interactive Table
+            st.markdown("### Action Items")
+            df_actions = jira_skill.generate_jira_tickets(action_items_part)
+            
+            if not df_actions.empty:
+                st.dataframe(df_actions, use_container_width=True, hide_index=True)
+            else:
+                # Fallback: If parsing fails for some reason, show it as code
+                st.code(action_items_part, language="json")
+        else:
+            # Fallback: If no Action Items exist yet, just render the whole thing
+            st.markdown(report_text)
+            
     st.divider()
 
     # Check if Action Items were successfully generated in the report.
-    # Since we forced compact JSON, we can just check for the opening bracket and brace.
-    # This is much faster and prevents false positives from markdown wrappers.
+    # We look for '[{' which is the start of our compact JSON.
     has_action_items = "[{" in st.session_state.rca_report
 
     # Action Buttons (Only show if not yet approved)
     if st.session_state.status in ['generated', 'revision']:
-
+        
         # --- FALLBACK: Missing Action Items ---
         if not has_action_items:
-            st.error("**Action Items Missing:** The AI failed to generate the structured JSON action items (likely due to output truncation). You can regenerate just the action items without re-running the full report.")
+            st.error("**Action Items Missing:** The AI failed to generate the structured JSON action items. You can regenerate just the action items without re-running the full report.")
             if st.button("Regenerate Action Items Only", type="primary", use_container_width=True):
                 with st.spinner("Generating action items..."):
                     try:
@@ -150,17 +171,16 @@ if st.session_state.status in ['generated', 'revision', 'approved', 'jira']:
                         
                         # Isolate the narrative to prevent feeding old JSON back to the LLM
                         narrative_part = st.session_state.rca_report.split("## Action Items")[0].strip()
-                        
                         action_items_text = rca_agent.regenerate_action_items(narrative_part)
                         
-                        # Rebuild the report with the fresh Action Items (prevents duplication)
+                        # Rebuild the report with the fresh Action Items
                         st.session_state.rca_report = f"{narrative_part}\n\n## Action Items\n{action_items_text}"
                         st.rerun()
                     except rca_agent.APICallFailedError as e:
                         st.error(str(e))
                     except Exception as e:
                         st.error(f"Failed to generate action items: {str(e)}")
-
+        
         # --- NORMAL FLOW: Action Items Exist ---
         else:
             col1, col2 = st.columns(2)
