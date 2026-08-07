@@ -4,6 +4,7 @@ jira_skill.py
 The Custom Skill for the Incident RCA Agent.
 Deterministically parses the JSON-formatted 'Action Items' block from the RCA report
 and converts it into a Jira-ready Pandas DataFrame.
+Includes robust sanitization for common LLM JSON formatting errors.
 """
 
 import re
@@ -18,9 +19,7 @@ logger = logging.getLogger(__name__)
 
 def extract_json_block(rca_markdown: str) -> Optional[str]:
     """
-    Extracts the JSON string from a markdown code block or raw text.
-    Uses bracket matching to ensure it captures the exact JSON array, 
-    ignoring any trailing garbage text from the LLM.
+    Extracts the raw JSON string using bracket matching.
     """
     # 1. Standard regex to find ```json ... ```
     pattern = r"```json\s*(.*?)\s*```"
@@ -58,26 +57,22 @@ def extract_json_block(rca_markdown: str) -> Optional[str]:
             elif char == ']':
                 bracket_count -= 1
                 if bracket_count == 0:
-                    candidate = rca_markdown[start_idx:i+1]
-                    try:
-                        json.loads(candidate)
-                        return candidate.strip()
-                    except json.JSONDecodeError:
-                        # If it's invalid JSON, we break and return None
-                        return None
+                    return rca_markdown[start_idx:i+1].strip()
                         
     return None
+
+def sanitize_json_string(json_str: str) -> str:
+    """
+    Cleans common LLM JSON formatting errors that break Python's strict json.loads().
+    """
+    # Remove trailing commas before closing brackets (e.g., `},]` -> `}]`)
+    json_str = re.sub(r',\s*([\]}])', r'\1', json_str)
+    
+    return json_str
 
 def generate_jira_tickets(rca_markdown: str) -> pd.DataFrame:
     """
     Parses the JSON action items from an RCA report into a Pandas DataFrame.
-    Gracefully handles missing blocks or invalid JSON by returning an empty DataFrame.
-
-    Args:
-        rca_markdown (str): The full RCA report in Markdown format.
-
-    Returns:
-        pd.DataFrame: A DataFrame containing columns: Title, Description, Priority, Assignee.
     """
     expected_columns = ['Title', 'Description', 'Priority', 'Assignee']
     empty_df = pd.DataFrame(columns=expected_columns)
@@ -86,12 +81,16 @@ def generate_jira_tickets(rca_markdown: str) -> pd.DataFrame:
     json_str = extract_json_block(rca_markdown)
     
     if not json_str:
-        logger.warning("No JSON code block found in the RCA report.")
+        logger.warning("No JSON block found in the RCA report.")
         return empty_df
 
     try:
-        logger.info("Parsing JSON data...")
-        tickets_data: List[Dict[str, Any]] = json.loads(json_str)
+        # Sanitize the raw JSON string before parsing
+        cleaned_json_str = sanitize_json_string(json_str)
+        
+        logger.info("Parsing sanitized JSON data...")
+        # Use strict=False to allow unescaped control characters inside strings
+        tickets_data: List[Dict[str, Any]] = json.loads(cleaned_json_str, strict=False)
         
         if not isinstance(tickets_data, list):
             logger.warning("Extracted JSON is not a list. Expected an array of objects.")
@@ -116,8 +115,8 @@ def generate_jira_tickets(rca_markdown: str) -> pd.DataFrame:
         return df
 
     except json.JSONDecodeError as e:
-        logger.warning(f"Failed to parse extracted string as valid JSON: {e}")
+        logger.error(f"Failed to parse JSON even after sanitization: {e}")
         return empty_df
     except Exception as e:
-        logger.warning(f"Unexpected error processing Jira tickets: {e}")
+        logger.error(f"Unexpected error processing Jira tickets: {e}")
         return empty_df
