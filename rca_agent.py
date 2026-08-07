@@ -98,25 +98,17 @@ Be concise. Do not pad sections unnecessarily.
 
 ACTION_ITEMS_PROMPT = """You are an SRE producing Jira tickets from a completed RCA report.
 
-Based on the following RCA report, produce ONLY a JSON array of action items. No other text, no explanation, no markdown prose — output the JSON array only, wrapped in a ```json block.
-
-Schema:
-```json
-[
-  {{
-    "Title": "Concise task title",
-    "Description": "What must be done and why, referencing the RCA findings.",
-    "Priority": "High",
-    "Assignee": "Role (e.g., Backend Eng, DevOps, DBA)"
-  }}
-]
-```
+Based on the following RCA report, produce ONLY a JSON array of action items. No other text, no explanation, no markdown prose. 
 
 CRITICAL JSON FORMATTING RULES:
-1. Do not use literal line breaks inside JSON string values. Use the escaped sequence \\n instead.
-2. Do not include markdown formatting inside the JSON strings.
-3. Ensure all double quotes inside strings are escaped as \\".
-4. Output nothing after the closing ```.
+1. Output COMPACT, MINIFIED JSON. Remove all unnecessary whitespace, indentation, and newlines between objects.
+2. Do not use literal line breaks inside string values; use the escaped sequence \\n instead.
+3. Do not use markdown formatting (like **bold**) inside the JSON strings.
+4. Ensure all double quotes inside strings are escaped as \\".
+5. The output must be a single, valid, parseable JSON array.
+
+Schema Example:
+[{{"Title":"Concise task title","Description":"What must be done and why.","Priority":"High","Assignee":"Role"}}]
 
 Priority must be exactly "High", "Medium", or "Low".
 
@@ -227,7 +219,7 @@ def _generate_action_items(narrative: str) -> str:
         contents=prompt,
         config=types.GenerateContentConfig(
             temperature=0.1,
-            max_output_tokens=1024
+            max_output_tokens=4096  # Increased from 1024 to prevent action items truncation
         )
     )
 
