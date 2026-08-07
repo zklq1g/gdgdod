@@ -104,7 +104,7 @@ Human Feedback:
 def _init_stream(prompt: str):
     """Tenacity-protected stream initializer. Retries on 429/503 at connection time."""
     return client.models.generate_content_stream(
-        model='gemini-2.5-flash',
+        model='gemini-flash-latest',
         contents=prompt,
         config=types.GenerateContentConfig(
             temperature=0.2,
@@ -188,7 +188,7 @@ def _generate_action_items(narrative: str) -> str:
     logger.info("Generating structured JSON action items (blocking call)...")
     prompt = ACTION_ITEMS_PROMPT.format(narrative=narrative)
     response = client.models.generate_content(
-        model='gemini-2.5-flash',
+        model='gemini-flash-latest',
         contents=prompt,
         config=types.GenerateContentConfig(
             temperature=0.1,
@@ -255,14 +255,14 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> Gene
         logger.error(f"Unexpected error during RCA generation: {e}")
         raise APICallFailedError(f"An unexpected system error occurred: {e}") from e
 
+# --- REGENERATE ACTION ITEMS FALLBACK ---
 def regenerate_action_items(rca_report: str) -> str:
     """
     Regenerates ONLY the Action Items JSON from an existing RCA report.
-    Useful if the initial generation failed or was truncated, saving API quota
-    by not re-processing the raw logs.
     """
     logger.info("Regenerating action items from existing report...")
     return _generate_action_items(rca_report)
+
 
 if __name__ == '__main__':
     import sys
@@ -281,3 +281,5 @@ if __name__ == '__main__':
 
     except Exception as e:
         logger.error(f"Test run failed: {e}")
+
+
