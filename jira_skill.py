@@ -19,39 +19,53 @@ logger = logging.getLogger(__name__)
 def extract_json_block(rca_markdown: str) -> Optional[str]:
     """
     Extracts the JSON string from a markdown code block or raw text.
-
-    Args:
-        rca_markdown (str): The full RCA report in Markdown format.
-
-    Returns:
-        Optional[str]: The raw JSON string if found, otherwise None.
+    Uses bracket matching to ensure it captures the exact JSON array, 
+    ignoring any trailing garbage text from the LLM.
     """
-    # 1. Standard regex to find ```json ... ``` allowing for whitespace and case insensitivity
+    # 1. Standard regex to find ```json ... ```
     pattern = r"```json\s*(.*?)\s*```"
     match = re.search(pattern, rca_markdown, re.IGNORECASE | re.DOTALL)
     if match:
         return match.group(1).strip()
     
-    # 2. Fallback: Find ```json and read to the end of string or next ```
-    idx = rca_markdown.lower().find("```json")
-    if idx != -1:
-        content = rca_markdown[idx + 7:]
-        end_idx = content.find("```")
-        if end_idx != -1:
-            return content[:end_idx].strip()
-        return content.strip()
+    # 2. Fallback: Find the first '[' and match it with the closing ']'
+    start_idx = rca_markdown.find("[")
+    if start_idx == -1:
+        return None
         
-    # 3. Fallback: Directly extract array bounded by [ and ] if it looks like JSON
-    array_start = rca_markdown.find("[")
-    array_end = rca_markdown.rfind("]")
-    if array_start != -1 and array_end != -1 and array_end > array_start:
-        candidate = rca_markdown[array_start:array_end+1]
-        try:
-            json.loads(candidate)
-            return candidate.strip()
-        except Exception:
-            pass
-
+    bracket_count = 0
+    in_string = False
+    escape_next = False
+    
+    for i in range(start_idx, len(rca_markdown)):
+        char = rca_markdown[i]
+        
+        if escape_next:
+            escape_next = False
+            continue
+            
+        if char == '\\':
+            escape_next = True
+            continue
+            
+        if char == '"':
+            in_string = not in_string
+            continue
+            
+        if not in_string:
+            if char == '[':
+                bracket_count += 1
+            elif char == ']':
+                bracket_count -= 1
+                if bracket_count == 0:
+                    candidate = rca_markdown[start_idx:i+1]
+                    try:
+                        json.loads(candidate)
+                        return candidate.strip()
+                    except json.JSONDecodeError:
+                        # If it's invalid JSON, we break and return None
+                        return None
+                        
     return None
 
 def generate_jira_tickets(rca_markdown: str) -> pd.DataFrame:

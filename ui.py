@@ -132,10 +132,9 @@ if st.session_state.status in ['generated', 'revision', 'approved', 'jira']:
     st.divider()
 
     # Check if Action Items were successfully generated in the report.
-    # We use the actual parser to check if valid JSON exists, rather than relying on markdown wrappers.
-    import jira_skill
-    json_str = jira_skill.extract_json_block(st.session_state.rca_report)
-    has_action_items = json_str is not None
+    # Since we forced compact JSON, we can just check for the opening bracket and brace.
+    # This is much faster and prevents false positives from markdown wrappers.
+    has_action_items = "[{" in st.session_state.rca_report
 
     # Action Buttons (Only show if not yet approved)
     if st.session_state.status in ['generated', 'revision']:
