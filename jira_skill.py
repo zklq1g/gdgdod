@@ -27,10 +27,14 @@ def extract_json_block(rca_markdown: str) -> Optional[str]:
     if match:
         return match.group(1).strip()
     
-    # 2. Fallback: Find the first '[' and match it with the closing ']'
-    start_idx = rca_markdown.find("[")
-    if start_idx == -1:
+    # 2. Fallback: Find the start of the JSON array. 
+    # We specifically look for '[{' (with optional whitespace) to skip over 
+    # citation brackets like '[Log Line 3]' in the narrative text.
+    match = re.search(r'\[\s*\{', rca_markdown)
+    if not match:
         return None
+        
+    start_idx = match.start()
         
     bracket_count = 0
     in_string = False
