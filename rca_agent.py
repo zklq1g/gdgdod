@@ -2,22 +2,23 @@
 rca_agent.py
 
 The Core Brain of the Incident RCA Agent.
-Updated with Free-Tier Optimizations:
-- In-memory caching to prevent burning API quota on identical requests.
-- Explicit max_output_tokens to prevent mid-generation cutoffs.
-- Request throttling to prevent RPM (Requests Per Minute) rate limits.
+Updated with Advanced Free-Tier Architecture:
+- Thread-safe Leaky Bucket Rate Limiter to prevent 429 errors.
+- SHA-256 deterministic caching to preserve daily RPD quota.
+- Jittered exponential backoff to prevent thundering herd retries.
 """
 
 import os
 import time
 import hashlib
 import logging
+import threading
 from typing import Optional, Generator
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
+from tenacity import retry, stop_after_attempt, wait_exponential, wait_random, retry_if_exception_type, RetryError
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -35,14 +36,52 @@ client = genai.Client(api_key=API_KEY)
 class APICallFailedError(Exception):
     pass
 
-# --- FREE TIER OPTIMIZATION: IN-MEMORY CACHE ---
-# Prevents burning your daily quota (1500 RPD) when testing the same logs repeatedly.
+# ==============================================================================
+# FREE TIER ARCHITECTURE: LEAKY BUCKET RATE LIMITER
+# ==============================================================================
+class RateLimiter:
+    """Thread-safe leaky bucket rate limiter to prevent 429 RPM errors."""
+    def __init__(self, max_calls: int, period: float):
+        self.max_calls = max_calls
+        self.period = period
+        self.calls = 0
+        self.last_reset = time.time()
+        self.lock = threading.Lock()
+
+    def wait(self):
+        with self.lock:
+            now = time.time()
+            # Reset window if period has elapsed
+            if now - self.last_reset > self.period:
+                self.calls = 0
+                self.last_reset = now
+
+            # If limit reached, sleep until the window resets
+            if self.calls >= self.max_calls:
+                sleep_time = self.period - (now - self.last_reset)
+                if sleep_time > 0:
+                    logger.info(f"Rate limit reached. Sleeping for {sleep_time:.2f}s to respect RPM cap...")
+                    time.sleep(sleep_time)
+                self.calls = 0
+                self.last_reset = time.time()
+
+            self.calls += 1
+
+# Safe margin: 10 requests per 60 seconds (Limit is 15 RPM, leaving 5 RPM buffer)
+api_rate_limiter = RateLimiter(max_calls=10, period=60.0)
+
+# ==============================================================================
+# FREE TIER ARCHITECTURE: SHA-256 DETERMINISTIC CACHING
+# ==============================================================================
 _API_CACHE = {}
 
 def _get_cache_key(text: str) -> str:
-    return hashlib.md5(text.encode('utf-8')).hexdigest()
+    """Generates a SHA-256 hash for deterministic cache lookups."""
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
-# --- PROMPTS ---
+# ==============================================================================
+# PROMPTS
+# ==============================================================================
 
 NARRATIVE_PROMPT = """You are an Expert Site Reliability Engineer (SRE) and Root Cause Analysis (RCA) Specialist. Analyze the provided system logs and generate a blameless Root Cause Analysis report.
 
@@ -93,53 +132,51 @@ Human Feedback:
 {feedback}
 """
 
-# --- API HELPERS ---
+# ==============================================================================
+# API HELPERS
+# ==============================================================================
 
 @retry(
     stop=stop_after_attempt(5),
-    wait=wait_exponential(multiplier=2, min=10, max=60),
+    # Added wait_random for jitter to prevent thundering herd synchronization
+    wait=wait_exponential(multiplier=2, min=4, max=60) + wait_random(0, 5),
     retry=retry_if_exception_type(APIError),
     reraise=True
 )
-def _init_stream(prompt: str):
-    """Tenacity-protected stream initializer. Retries on 429/503 at connection time."""
+def _init_narrative_stream(prompt: str):
+    """Initializes the streaming API call with rate limiting."""
+    api_rate_limiter.wait()  # Enforce leaky bucket rate limit
+    logger.info("Initializing narrative report stream...")
     return client.models.generate_content_stream(
         model='gemini-flash-latest',
         contents=prompt,
         config=types.GenerateContentConfig(
             temperature=0.2,
-            max_output_tokens=8192
+            max_output_tokens=8192  # Max free tier output limit
         )
     )
 
 def _generate_narrative_stream(prompt: str) -> Generator[str, None, None]:
-    """
-    Streaming generator for the narrative report.
-    Includes caching and free-tier output limit protections.
-    """
+    """Streaming generator for the narrative report with caching."""
     cache_key = _get_cache_key(prompt)
 
-    # 1. Return from cache if available (Saves API Quota!)
     if cache_key in _API_CACHE:
-        logger.info("Returning cached narrative stream to save API quota.")
+        logger.info("Cache HIT: Returning cached narrative stream to save API quota.")
         last_chunk = None
         for chunk in _API_CACHE[cache_key]:
             if chunk.text:
                 yield chunk.text
             last_chunk = chunk
 
-        # Check truncation even for cached responses
         if last_chunk and hasattr(last_chunk, 'candidates') and last_chunk.candidates:
             finish_reason = last_chunk.candidates[0].finish_reason
             if finish_reason and 'MAX_TOKENS' in str(finish_reason).upper():
-                yield "\n\n---\n**⚠ WARNING: Output Truncated**\nThe report exceeded the free-tier output token limit (8192 tokens) and was cut off. Please upload smaller log files."
+                yield "\n\n---\n**WARNING: Output Truncated**\nThe report exceeded the free-tier output token limit and was cut off."
         return
 
-    # 2. Fetch from API and cache
-    logger.info("Initializing narrative report stream...")
+    logger.info("Cache MISS: Fetching narrative stream from API...")
     try:
-        stream = _init_stream(prompt)
-
+        stream = _init_narrative_stream(prompt)
         chunks_to_cache = []
         last_chunk = None
 
@@ -149,19 +186,16 @@ def _generate_narrative_stream(prompt: str) -> Generator[str, None, None]:
                 yield chunk.text
             last_chunk = chunk
 
-        # Cache the chunks for future identical requests
         _API_CACHE[cache_key] = chunks_to_cache
 
-        # Log token usage
         if last_chunk and hasattr(last_chunk, 'usage_metadata') and last_chunk.usage_metadata:
             usage = last_chunk.usage_metadata
-            logger.info(f"Narrative Token Usage - Prompt: {usage.prompt_token_count}, Candidates: {usage.candidates_token_count}, Total: {usage.total_token_count}")
+            logger.info(f"Narrative Token Usage - Prompt: {usage.prompt_token_count}, Candidates: {usage.candidates_token_count}")
 
-        # Check for truncation (Mid-generation cutoff detection)
         if last_chunk and hasattr(last_chunk, 'candidates') and last_chunk.candidates:
             finish_reason = last_chunk.candidates[0].finish_reason
             if finish_reason and 'MAX_TOKENS' in str(finish_reason).upper():
-                yield "\n\n---\n**⚠ WARNING: Output Truncated**\nThe report exceeded the free-tier output token limit (8192 tokens) and was cut off. Please upload smaller log files or split them into multiple analyses."
+                yield "\n\n---\n**WARNING: Output Truncated**\nThe report exceeded the free-tier output token limit and was cut off."
 
     except APIError as e:
         logger.error(f"Google API Error during narrative streaming: {e}")
@@ -172,20 +206,21 @@ def _generate_narrative_stream(prompt: str) -> Generator[str, None, None]:
 
 @retry(
     stop=stop_after_attempt(5),
-    wait=wait_exponential(multiplier=2, min=10, max=60),
+    wait=wait_exponential(multiplier=2, min=4, max=60) + wait_random(0, 5),
     retry=retry_if_exception_type(APIError),
     reraise=True
 )
 def _generate_action_items(narrative: str) -> str:
-    """Blocking call to generate the JSON action items. Includes caching."""
+    """Blocking call to generate the JSON action items with rate limiting and caching."""
     cache_key = _get_cache_key(f"action_items_{narrative}")
 
-    # Return from cache if available
     if cache_key in _API_CACHE:
-        logger.info("Returning cached action items to save API quota.")
+        logger.info("Cache HIT: Returning cached action items to save API quota.")
         return _API_CACHE[cache_key]
 
-    logger.info("Generating structured JSON action items (blocking call)...")
+    api_rate_limiter.wait()  # Enforce leaky bucket rate limit
+    logger.info("Cache MISS: Generating structured JSON action items...")
+
     prompt = ACTION_ITEMS_PROMPT.format(narrative=narrative)
     response = client.models.generate_content(
         model='gemini-flash-latest',
@@ -196,16 +231,17 @@ def _generate_action_items(narrative: str) -> str:
         )
     )
 
-    # Cache the result
     _API_CACHE[cache_key] = response.text
 
     if hasattr(response, 'usage_metadata') and response.usage_metadata:
         usage = response.usage_metadata
-        logger.info(f"Action Items Token Usage - Prompt: {usage.prompt_token_count}, Candidates: {usage.candidates_token_count}, Total: {usage.total_token_count}")
+        logger.info(f"Action Items Token Usage - Prompt: {usage.prompt_token_count}, Candidates: {usage.candidates_token_count}")
 
     return response.text
 
-# --- PUBLIC API ---
+# ==============================================================================
+# PUBLIC API
+# ==============================================================================
 
 def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> Generator[str, None, None]:
     if not log_text or not log_text.strip():
@@ -239,9 +275,8 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> Gene
         # --- CALL 2: Generate structured Action Items (blocking) ---
         yield "\n\n## Action Items\n\n"
 
-        # FREE TIER FIX: Small delay to prevent hitting the 15 RPM limit
-        time.sleep(2)
-
+        # Note: The leaky bucket rate limiter inside _generate_action_items
+        # automatically handles the delay, so no manual time.sleep() is needed here.
         action_items_text = _generate_action_items(full_narrative)
         yield action_items_text
         logger.info("Action items generated successfully.")
@@ -255,14 +290,16 @@ def analyze_incident(log_text: str, user_feedback: Optional[str] = None) -> Gene
         logger.error(f"Unexpected error during RCA generation: {e}")
         raise APICallFailedError(f"An unexpected system error occurred: {e}") from e
 
-# --- REGENERATE ACTION ITEMS FALLBACK ---
+# ==============================================================================
+# FALLBACK & MAIN
+# ==============================================================================
+
 def regenerate_action_items(rca_report: str) -> str:
     """
     Regenerates ONLY the Action Items JSON from an existing RCA report.
     """
     logger.info("Regenerating action items from existing report...")
     return _generate_action_items(rca_report)
-
 
 if __name__ == '__main__':
     import sys
@@ -281,5 +318,3 @@ if __name__ == '__main__':
 
     except Exception as e:
         logger.error(f"Test run failed: {e}")
-
-

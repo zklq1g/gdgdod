@@ -10,6 +10,7 @@ import streamlit as st
 import pandas as pd
 import logging
 import rca_agent
+print(f"LOADING RCA_AGENT FROM: {rca_agent.__file__}")
 import jira_skill
 
 # Configure logging
@@ -138,7 +139,7 @@ if st.session_state.status in ['generated', 'revision', 'approved', 'jira']:
 
         # --- FALLBACK: Missing Action Items ---
         if not has_action_items:
-            st.error("⚠️ **Action Items Missing:** The AI failed to generate the structured JSON action items (likely due to output truncation). You can regenerate just the action items without re-running the full report.")
+            st.error("**Action Items Missing:** The AI failed to generate the structured JSON action items (likely due to output truncation). You can regenerate just the action items without re-running the full report.")
             if st.button("Regenerate Action Items Only", type="primary", use_container_width=True):
                 with st.spinner("Generating action items..."):
                     try:
