@@ -131,8 +131,11 @@ if st.session_state.status in ['generated', 'revision', 'approved', 'jira']:
         st.markdown(st.session_state.rca_report)
     st.divider()
 
-    # Check if Action Items were successfully generated in the report
-    has_action_items = "```json" in st.session_state.rca_report
+    # Check if Action Items were successfully generated in the report.
+    # We use the actual parser to check if valid JSON exists, rather than relying on markdown wrappers.
+    import jira_skill
+    json_str = jira_skill.extract_json_block(st.session_state.rca_report)
+    has_action_items = json_str is not None
 
     # Action Buttons (Only show if not yet approved)
     if st.session_state.status in ['generated', 'revision']:
@@ -144,10 +147,15 @@ if st.session_state.status in ['generated', 'revision', 'approved', 'jira']:
                 with st.spinner("Generating action items..."):
                     try:
                         import time
-                        time.sleep(2)  # Throttle for free tier RPM limits
-                        action_items_text = rca_agent.regenerate_action_items(st.session_state.rca_report)
-                        # Append the newly generated JSON to the existing report
-                        st.session_state.rca_report += f"\n\n## Action Items\n\n{action_items_text}"
+                        time.sleep(2) # Throttle for free tier RPM limits
+                        
+                        # Isolate the narrative to prevent feeding old JSON back to the LLM
+                        narrative_part = st.session_state.rca_report.split("## Action Items")[0].strip()
+                        
+                        action_items_text = rca_agent.regenerate_action_items(narrative_part)
+                        
+                        # Rebuild the report with the fresh Action Items (prevents duplication)
+                        st.session_state.rca_report = f"{narrative_part}\n\n## Action Items\n{action_items_text}"
                         st.rerun()
                     except rca_agent.APICallFailedError as e:
                         st.error(str(e))
