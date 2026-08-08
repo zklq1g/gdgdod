@@ -1,0 +1,7 @@
+- **Role:** AI coding assistant rules.
+- **Objective:** Maintain clean, documented code and strict adherence to the architecture.
+- **Guidelines:**
+  1. All new logic must be covered by `pytest` unit tests.
+  2. Mock external APIs (e.g., Gemini) in tests.
+  3. No "wip" or "fix" commits. Use semantic commit messages.
+  4. Ensure all changes align with `ARCHITECTURE.md`.
