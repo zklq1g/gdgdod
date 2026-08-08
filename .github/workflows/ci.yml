@@ -34,4 +34,4 @@ jobs:
       env:
         GOOGLE_API_KEY: "dummy_ci_key" 
       run: |
-        pytest tests/ -v
+        python -m pytest tests/ -v
