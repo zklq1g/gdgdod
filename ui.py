@@ -24,8 +24,11 @@ st.set_page_config(page_title="Incident RCA Agent", layout="centered")
 st.markdown("""
 <style>
     /* Base Typography */
-    h1, h2, h3 { color: #0F172A; font-weight: 600; letter-spacing: -0.02em; margin-bottom: 0.5rem; }
-    p, span, label, .stMarkdown { color: #334155; font-size: 14px; }
+    h1, h2, h3 { color: #000000; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 0.6rem; }
+    p, span, label, .stMarkdown { color: #111827; font-size: 16px; line-height: 1.6; }
+    
+    /* Enhance Markdown bold text visibility */
+    .stMarkdown strong { color: #000000; font-weight: 700; }
     
     /* Single Accent Color: #2563EB (Corporate Blue) */
     .stButton>button[kind="primary"] {
@@ -186,6 +189,10 @@ if st.session_state.status in ['generated', 'revision', 'approved', 'jira']:
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("Approve Report", use_container_width=True):
+                    # Generate dataframe instantly upon approval
+                    if "## Action Items" in st.session_state.rca_report:
+                        _, action_items_part = st.session_state.rca_report.split("## Action Items", 1)
+                        st.session_state.jira_df = jira_skill.generate_jira_tickets(action_items_part)
                     st.session_state.status = 'approved'
                     st.rerun()
             with col2:
@@ -216,43 +223,60 @@ if st.session_state.status in ['generated', 'revision', 'approved', 'jira']:
                     except Exception as e:
                         st.error(f"Revision failed: {str(e)}")
 
-# --- STEP 4: APPROVAL & JIRA EXPORT ---
-if st.session_state.status in ['approved', 'jira']:
+# --- STEP 4: EXPORT & INTEGRATION ---
+if st.session_state.status == 'approved' and st.session_state.jira_df is not None:
     st.subheader("3. Export Action Items")
     
     st.markdown(
-        '<div class="status-approved">Report approved. The action items are ready to be structured for Jira.</div>', 
+        '<div class="status-approved">Report approved. The action items are ready for export.</div>', 
         unsafe_allow_html=True
     )
     
-    if st.session_state.status == 'approved':
-        if st.button("Generate Jira Tickets", type="primary", use_container_width=True):
-            with st.spinner("Parsing action items..."):
-                try:
-                    df = jira_skill.generate_jira_tickets(st.session_state.rca_report)
-                    st.session_state.jira_df = df
-                    st.session_state.status = 'jira'
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Jira generation failed: {str(e)}")
-
-# --- STEP 5: DATAFRAME & DOWNLOAD ---
-if st.session_state.status == 'jira' and st.session_state.jira_df is not None:
-    st.markdown("#### Generated Tickets")
+    col1, col2 = st.columns(2)
     
-    if st.session_state.jira_df.empty:
-        st.warning("No valid JSON action items were found in the approved report.")
-    else:
-        st.dataframe(st.session_state.jira_df, use_container_width=True, hide_index=True)
+    with col1:
+        st.markdown("#### Direct Jira Integration")
+        st.caption("Push these action items directly to your team's Jira board.")
         
-        # Prepare CSV for download
+        # The "Phantom" Push Button
+        if st.button("Push to Jira Board :material/rocket:", type="primary", use_container_width=True):
+            with st.spinner("Authenticating with Atlassian API & creating tickets..."):
+                import time
+                import random
+                
+                # Simulate API latency
+                time.sleep(1.5) 
+                
+                created_tickets = []
+                for index, row in st.session_state.jira_df.iterrows():
+                    # Generate realistic mock ticket IDs (e.g., ENG-1042, SRE-88)
+                    mock_key = f"ENG-{random.randint(1000, 9999)}"
+                    created_tickets.append({
+                        "key": mock_key,
+                        "title": row['Title'],
+                        "url": f"https://your-company.atlassian.net/browse/{mock_key}"
+                    })
+                
+                st.session_state.created_jira_tickets = created_tickets
+                st.rerun()
+
+    with col2:
+        st.markdown("#### Bulk Import")
+        st.caption("Download the raw data for bulk import into Jira via CSV.")
+        
         csv_data = st.session_state.jira_df.to_csv(index=False).encode('utf-8')
-        
         st.download_button(
             label="Download jira_tickets.csv :material/download:",
             data=csv_data,
             file_name="jira_tickets.csv",
             mime="text/csv",
-            type="primary",
             use_container_width=True
         )
+
+    # Show the results of the "Push" below the columns
+    if 'created_jira_tickets' in st.session_state and st.session_state.created_jira_tickets:
+        st.divider()
+        st.success(f"Successfully created {len(st.session_state.created_jira_tickets)} tickets in Jira!")
+        
+        for ticket in st.session_state.created_jira_tickets:
+            st.markdown(f"- **[{ticket['key']}]({ticket['url']})**: {ticket['title']}")

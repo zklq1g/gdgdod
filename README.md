@@ -15,37 +15,34 @@ Follow these exact steps to install and run the application locally.
    cd incident-rca-agent
    ```
 
-2. **Set up a virtual environment & install dependencies** (Python 3.10+ required)
-   ```bash
-   python -m venv venv
-   # On macOS/Linux:
-   source venv/bin/activate
-   # On Windows:
-   venv\Scripts\activate
-   
-   pip install -r requirements.txt
-   ```
-
-3. **Configure Environment Variables**
+2. **Configure Environment Variables**
    Create a `.env` file in the root directory and add your Google Gemini API key:
    ```env
    GOOGLE_API_KEY=your_actual_api_key_here
    ```
 
-4. **Run the Application**
+3. **Run the Application** (Auto-Setup)
+   We have provided automated scripts that will instantly create a virtual environment, install dependencies, and launch the UI. (Python 3.10+ required).
+   
+   **On Windows:**
+   Double-click `run.bat` or run it from the terminal:
+   ```cmd
+   run.bat
+   ```
+   
+   **On macOS/Linux:**
    ```bash
-   streamlit run ui.py
+   bash run.sh
    ```
 
-5. **How to Use**
+4. **How to Use**
    - Upload a `.txt` log file (e.g., `mock_logs.txt`).
    - Click **Generate RCA Report**.
    - Review the AI-generated report. If needed, type feedback in the revision box to request changes.
    - Click **Approve Report** to finalize.
-   - Click **Generate Jira Tickets** to extract action items.
-   - Download the generated `jira_tickets.csv`.
+   - You can now push directly to the mocked Jira board or download the `jira_tickets.csv` for bulk import.
 
-6. **Run the Tests**
+5. **Run the Tests**
    Ensure dependencies are installed, then run:
    ```bash
    pytest tests/ -v
