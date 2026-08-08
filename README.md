@@ -3,7 +3,7 @@
 An AI-powered Developer Productivity Tool that ingests chaotic system logs, performs blameless Root Cause Analysis (RCA) with strict traceability, and exports actionable Jira tickets.
 
 ##  Demo Video
-[Link to Demo Video (Placeholder)](#)
+[Watch the Demo on YouTube](https://youtu.be/Iq46AibUuiY)
 
 ##  Quick Start
 
